@@ -1,8 +1,9 @@
 import json
+import os
 from io import BytesIO
 from typing import Any
 
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, Header, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
@@ -15,13 +16,48 @@ class PatientData(BaseModel):
     cough_duration_days: int
 
 
+def _parse_bool_env(name: str, default: bool) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_origins(value: str) -> list[str]:
+    cleaned = [origin.strip() for origin in value.split(",") if origin.strip()]
+    return cleaned if cleaned else ["*"]
+
+
 app = FastAPI(title="LungLens API")
+
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development").strip().lower()
+ALLOWED_ORIGINS = _parse_origins(
+    os.getenv("ALLOWED_ORIGINS", "*" if ENVIRONMENT != "production" else "")
+)
+REQUIRE_API_KEY = _parse_bool_env(
+    "REQUIRE_API_KEY", default=(ENVIRONMENT == "production")
+)
+API_KEY = os.getenv("API_KEY", "").strip()
+MAX_UPLOAD_MB = max(int(os.getenv("MAX_UPLOAD_MB", "10")), 1)
+MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
+ALLOWED_IMAGE_MIME_TYPES = {
+    item.strip().lower()
+    for item in os.getenv(
+        "ALLOWED_IMAGE_MIME_TYPES", "image/jpeg,image/png,image/webp"
+    ).split(",")
+    if item.strip()
+}
+
+if ENVIRONMENT == "production" and ("*" in ALLOWED_ORIGINS or not ALLOWED_ORIGINS):
+    raise RuntimeError(
+        "Production requires explicit ALLOWED_ORIGINS (comma-separated, no wildcard)."
+    )
 
 # TODO: Restrict CORS origins/methods/headers before production deployment.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=ALLOWED_ORIGINS != ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -79,6 +115,16 @@ def _safe_parse_questionnaire(questionnaire: str | None) -> dict[str, Any] | Non
             raise ValueError(f"Invalid patient_data schema: {exc.errors()}") from exc
 
     return parsed
+
+
+def _validate_api_key(x_api_key: str | None) -> JSONResponse | None:
+    if not REQUIRE_API_KEY:
+        return None
+    if not API_KEY:
+        return _error_response("Server API key is not configured.", 500)
+    if x_api_key != API_KEY:
+        return _error_response("Unauthorized.", 401)
+    return None
 
 
 def _build_mock_predictions(image_bytes: bytes) -> dict[str, float]:
@@ -206,14 +252,30 @@ def _build_pipeline_outputs(
     }
 
 
-async def _analyze_internal(image: UploadFile, questionnaire: str | None) -> JSONResponse:
+async def _analyze_internal(
+    image: UploadFile, questionnaire: str | None, x_api_key: str | None
+) -> JSONResponse:
     try:
+        auth_error = _validate_api_key(x_api_key)
+        if auth_error is not None:
+            return auth_error
+
         if not image.filename:
             return _error_response("Missing uploaded image filename.", 400)
+
+        content_type = (image.content_type or "").lower()
+        if content_type not in ALLOWED_IMAGE_MIME_TYPES:
+            return _error_response(
+                f"Unsupported image content type: {content_type or 'unknown'}.", 415
+            )
 
         image_bytes = await image.read()
         if not image_bytes:
             return _error_response("Uploaded image is empty.", 400)
+        if len(image_bytes) > MAX_UPLOAD_BYTES:
+            return _error_response(
+                f"Uploaded image exceeds max size of {MAX_UPLOAD_MB} MB.", 413
+            )
 
         try:
             Image.open(BytesIO(image_bytes)).verify()
@@ -242,13 +304,21 @@ async def healthz() -> dict[str, str]:
 
 @app.post("/api/v1/analyze")
 async def analyze_v1(
-    image: UploadFile = File(...), questionnaire: str | None = Form(None)
+    image: UploadFile = File(...),
+    questionnaire: str | None = Form(None),
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> JSONResponse:
-    return await _analyze_internal(image=image, questionnaire=questionnaire)
+    return await _analyze_internal(
+        image=image, questionnaire=questionnaire, x_api_key=x_api_key
+    )
 
 
 @app.post("/pipeline/analyze")
 async def analyze_pipeline_alias(
-    image: UploadFile = File(...), questionnaire: str | None = Form(None)
+    image: UploadFile = File(...),
+    questionnaire: str | None = Form(None),
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> JSONResponse:
-    return await _analyze_internal(image=image, questionnaire=questionnaire)
+    return await _analyze_internal(
+        image=image, questionnaire=questionnaire, x_api_key=x_api_key
+    )
