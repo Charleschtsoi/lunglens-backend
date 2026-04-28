@@ -1,3 +1,13 @@
+---
+title: Lunglens Backend
+emoji: 🌖
+colorFrom: red
+colorTo: gray
+sdk: docker
+pinned: false
+license: mit
+---
+
 # LungLens Backend (Week 1 Skeleton)
 
 Minimal FastAPI backend skeleton for LungLens frontend integration and mock pipeline behavior.
