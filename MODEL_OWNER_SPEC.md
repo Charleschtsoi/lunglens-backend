@@ -93,6 +93,13 @@ Canonical order:
 ["Normal", "Lung Opacity", "Viral Pneumonia"]
 ```
 
+Canonical preprocessing for current Stage-2 `.h5` integration:
+
+- RGB input
+- resize to `224x224`
+- normalize with `/255.0` to `[0,1]`
+- do not apply `resnet_v2.preprocess_input` in this path
+
 Must map to:
 - `stage2.label` in `{"Normal", "Lung Opacity", "Viral Pneumonia", "Other"}`
 - `stage2.confidence` in `[0,1]`
