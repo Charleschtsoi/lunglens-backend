@@ -330,8 +330,13 @@ def _sanitize_inputlayer_config(node: Any) -> Any:
         config = node.get("config")
         if isinstance(config, dict):
             if node.get("class_name") == "InputLayer":
-                if "batch_shape" in config and "batch_input_shape" not in config:
-                    config["batch_input_shape"] = config["batch_shape"]
+                batch_shape = config.get("batch_input_shape", config.get("batch_shape"))
+                if not isinstance(batch_shape, (list, tuple)):
+                    batch_shape = [None, 224, 224, 3]
+                config["batch_input_shape"] = list(batch_shape)
+                dtype_value = config.get("dtype")
+                if not isinstance(dtype_value, str):
+                    config["dtype"] = "float32"
                 config.pop("batch_shape", None)
                 config.pop("optional", None)
             config.pop("quantization_config", None)
