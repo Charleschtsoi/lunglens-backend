@@ -12,6 +12,9 @@ license: mit
 
 Minimal FastAPI backend skeleton for LungLens frontend integration and mock pipeline behavior.
 
+See `ARCHITECTURE_ALIGNMENT.md` for the shared backend/frontend/ML pipeline contract derived from the v1.5 project architecture document.
+See `MULTI_DATASET_ADOPTION.md` for business validation, cost bands, and 30-day rollout guidance for multi-dataset expansion.
+
 ## Project structure
 
 - `main.py` - FastAPI app, health endpoints, and mock analyze pipeline.
@@ -80,6 +83,88 @@ docker run --rm -p 7860:7860 \
    - `LUNGLENS_API_KEY=<same value as backend API_KEY>` (server-side use only)
 3. Update frontend calls to include `X-API-Key` header.
 4. Add your Vercel production URL to backend `ALLOWED_ORIGINS`.
+
+## Frontend API contract (sync reference)
+
+This section mirrors the current frontend/backend integration contract.
+
+- **Browser -> Next.js**: `POST /api/analyze` (multipart form)
+- **Next.js -> Backend**: `POST {BACKEND_API_BASE_URL}/pipeline/analyze`
+- **Header**: `X-API-Key: <BACKEND_API_KEY>`
+- **Multipart fields**:
+  - `image` (required file, jpg/png/webp)
+  - `questionnaire` (optional stringified JSON)
+
+Backend always returns JSON:
+
+- Error:
+  - `{"success": false, "error": "human readable message"}`
+- Success:
+  - includes `success`, `predictions` (all 14 labels), `gradcam`, `stage1`, `stage2`, `gate`, `requires_questionnaire`, `stage3`, `report`, `timing_ms`
+
+Required enums:
+
+- `stage1.label`: `Pneumonia | Normal`
+- `stage2.label`: `Normal | Lung Opacity | Viral Pneumonia | Other`
+- `gate.route`: `early_stop | continue`
+- `gate.reason`: `both_negative | positive_detected`
+- `stage3.risk_level`: `low | medium | high`
+- `stage3.severity`: `low | moderate | high`
+
+Flow rules:
+
+- If `gate.route == continue` and questionnaire is missing:
+  - `requires_questionnaire: true`
+  - `report: null`
+- If questionnaire is present:
+  - `requires_questionnaire: false`
+  - include `stage3` and `report`
+- If `gate.route == early_stop`:
+  - backend may return immediate final output with `requires_questionnaire: false`
+
+Transport/auth/validation:
+
+- Invalid or missing API key -> `401`
+- Missing/invalid file -> `400`
+- Oversized upload -> `413`
+- Unsupported MIME type -> `415`
+- Error response shape always remains `{"success": false, "error": "<message>"}`.
+
+## Architecture compatibility endpoints
+
+To align with architecture notes while preserving the current frontend contract, the backend exposes both:
+
+- Current production endpoints:
+  - `GET /healthz`
+  - `POST /pipeline/analyze`
+  - `POST /api/v1/analyze`
+- Compatibility aliases:
+  - `GET /health` -> `{"status":"ok","models_loaded":<bool>}`
+  - `POST /predict` -> stage output + gate format
+  - `POST /assess` -> stage3/stage4 follow-up format
+
+Notes:
+
+- Existing frontend integration should continue using `/pipeline/analyze`.
+- Compatibility aliases are additive and non-breaking.
+
+## Stage-2 real model pilot (3-class only)
+
+You can enable only the uploaded `.h5` model for Stage 2 (`Normal | Lung Opacity | Viral Pneumonia`) while keeping the rest of the pipeline in mock mode.
+
+Set these backend env vars:
+
+```env
+ENABLE_H5_MODEL=true
+H5_MODEL_PATH=models/resnet152v2_lung_disease_final.h5
+H5_STAGE2_LABELS=Normal,Lung Opacity,Viral Pneumonia
+```
+
+Notes:
+
+- Stage 2 will use real model inference.
+- `predictions` (14 labels), gate/report scaffolding, and non-Stage-2 components remain mock-assisted for this pilot.
+- If `ENABLE_H5_MODEL=false` (default), backend uses full mock behavior.
 
 ## Example API calls
 

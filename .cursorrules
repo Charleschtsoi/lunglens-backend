@@ -1,0 +1,49 @@
+# LungLens Cursor Rules
+
+## Read Before Editing
+
+- Development is already in progress. Do not rewrite working files from scratch.
+- Before coding:
+  1) scan current code structure and behavior,
+  2) compare against architecture intent,
+  3) report aligned/misaligned/missing items,
+  4) make gentle, minimal adjustments.
+
+## System Boundaries
+
+- Frontend (Next.js on Vercel) and backend (FastAPI on HF Spaces) are separate systems.
+- Frontend never runs ML inference and never loads model weights.
+- Backend owns preprocessing, inference, gate logic, and report synthesis APIs.
+- Models are trained in Colab and exported to backend runtime; no training scripts required in app runtime.
+
+## API and Contract Guardrails
+
+- Keep backend responses JSON-only.
+- Preserve working frontend contract unless a critical mismatch is explicitly approved.
+- Keep error shape consistent: `{"success": false, "error": "<message>"}`.
+- Maintain gate behavior:
+  - show/require clinical questionnaire only when gate indicates continuation.
+- Maintain required enums and stable key names consumed by frontend.
+
+## Backend Responsibilities
+
+- Accept raw uploaded image files from frontend.
+- Perform backend-side validation (auth, type, size) and preprocessing.
+- Keep CORS restricted to intended frontend domains via env vars.
+- Keep secrets in environment/secrets, never hardcoded.
+
+## Warm-Up and Health
+
+- Ensure a lightweight health endpoint is available for frontend warm-up ping.
+- Warm-up call is non-blocking from frontend perspective.
+
+## LLM and Safety Constraints
+
+- LLM output must synthesize model outputs; avoid definitive diagnosis wording.
+- Always include disclaimer language in user-facing report sections.
+
+## Change Management
+
+- Keep existing custom UI/UX and styling decisions unless conflicting with core rules.
+- If uncertain whether behavior is intentional, ask before changing.
+- Prefer additive aliases/adapters over breaking endpoint or schema changes.
