@@ -4,6 +4,8 @@ import base64
 import random
 import math
 import logging
+import shutil
+import tempfile
 from io import BytesIO
 from typing import Any
 
@@ -372,10 +374,14 @@ def _load_h5_model_with_inputlayer_compat(tf: Any, model_path: str) -> Any:
 
     model_config = json.loads(raw_config)
     sanitized_config = _sanitize_inputlayer_config(model_config)
-    model_json = json.dumps(sanitized_config)
-    model = tf.keras.models.model_from_json(model_json)
-    model.load_weights(model_path)
-    return model
+
+    fd, compat_path = tempfile.mkstemp(suffix=".h5", prefix="lunglens-compat-")
+    os.close(fd)
+    shutil.copyfile(model_path, compat_path)
+    with h5py.File(compat_path, "r+") as patched_file:
+        patched_file.attrs["model_config"] = json.dumps(sanitized_config).encode("utf-8")
+
+    return tf.keras.models.load_model(compat_path, compile=False)
 
 
 def _run_h5_stage2_prediction(image_bytes: bytes) -> tuple[str, float, list[float]]:
