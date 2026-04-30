@@ -809,7 +809,17 @@ async def healthz() -> dict[str, str]:
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
-    return {"status": "ok", "models_loaded": _models_loaded_status()}
+    h5_loaded = H5_MODEL is not None and H5_MODEL_LOAD_ERROR is None
+    return {
+        "status": "ok",
+        "models_loaded": _models_loaded_status(),
+        "h5": {
+            "enabled": ENABLE_H5_MODEL,
+            "path": H5_MODEL_PATH,
+            "loaded": h5_loaded,
+            "error": H5_MODEL_LOAD_ERROR,
+        },
+    }
 
 
 @app.exception_handler(RequestValidationError)
