@@ -152,6 +152,12 @@ Notes:
 
 You can enable only the uploaded `.h5` model for Stage 2 (`Normal | Lung Opacity | Viral Pneumonia`) while keeping the rest of the pipeline in mock mode.
 
+Notebook-confirmed stage-2 assumptions:
+
+- Class order is fixed: `[Normal, Lung Opacity, Viral Pneumonia]`
+- Preprocessing: RGB -> resize to `224x224` -> normalize `/255.0`
+- No `resnet_v2.preprocess_input` in this path
+
 Set these backend env vars:
 
 ```env
@@ -165,6 +171,16 @@ Notes:
 - Stage 2 will use real model inference.
 - `predictions` (14 labels), gate/report scaffolding, and non-Stage-2 components remain mock-assisted for this pilot.
 - If `ENABLE_H5_MODEL=false` (default), backend uses full mock behavior.
+
+Optional uncertainty handling (disabled by default):
+
+```env
+STAGE2_UNCERTAINTY_ENABLED=false
+STAGE2_UNCERTAINTY_MIN_CONFIDENCE=0.55
+STAGE2_UNCERTAINTY_MIN_MARGIN=0.1
+```
+
+When uncertainty handling is enabled, low-confidence or borderline stage-2 outputs are mapped to `stage2.label = Other`.
 
 ## Example API calls
 
