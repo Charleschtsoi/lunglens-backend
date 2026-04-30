@@ -331,6 +331,7 @@ def _sanitize_inputlayer_config(node: Any) -> Any:
                 config["batch_input_shape"] = config["batch_shape"]
             config.pop("batch_shape", None)
             config.pop("optional", None)
+            config.pop("quantization_config", None)
             dtype_policy = config.get("dtype")
             if isinstance(dtype_policy, dict):
                 # Older runtimes cannot deserialize newer policy objects.
