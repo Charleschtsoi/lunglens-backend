@@ -44,6 +44,16 @@ def _parse_csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _parse_float_env(name: str, default: float) -> float:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        return float(raw_value.strip())
+    except ValueError:
+        return default
+
+
 app = FastAPI(title="LungLens API")
 
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development").strip().lower()
@@ -70,6 +80,13 @@ H5_MODEL_PATH = os.getenv(
 H5_STAGE2_LABELS = _parse_csv(
     os.getenv("H5_STAGE2_LABELS", "Normal,Lung Opacity,Viral Pneumonia")
 )
+STAGE2_UNCERTAINTY_ENABLED = _parse_bool_env(
+    "STAGE2_UNCERTAINTY_ENABLED", default=False
+)
+STAGE2_UNCERTAINTY_MIN_CONFIDENCE = _parse_float_env(
+    "STAGE2_UNCERTAINTY_MIN_CONFIDENCE", 0.55
+)
+STAGE2_UNCERTAINTY_MIN_MARGIN = _parse_float_env("STAGE2_UNCERTAINTY_MIN_MARGIN", 0.1)
 
 if ENVIRONMENT == "production" and ("*" in ALLOWED_ORIGINS or not ALLOWED_ORIGINS):
     raise RuntimeError(
@@ -270,7 +287,7 @@ def _load_h5_model() -> None:
         H5_MODEL_LOAD_ERROR = str(exc)
 
 
-def _run_h5_stage2_prediction(image_bytes: bytes) -> tuple[str, float]:
+def _run_h5_stage2_prediction(image_bytes: bytes) -> tuple[str, float, list[float]]:
     if H5_MODEL is None:
         if H5_MODEL_LOAD_ERROR:
             raise ValueError(f"H5 model unavailable: {H5_MODEL_LOAD_ERROR}")
@@ -295,6 +312,22 @@ def _run_h5_stage2_prediction(image_bytes: bytes) -> tuple[str, float]:
     max_idx = max(range(len(probs)), key=lambda idx: probs[idx])
     label = H5_STAGE2_LABELS[max_idx]
     confidence = round(float(probs[max_idx]), 3)
+    return label, confidence, [float(item) for item in probs]
+
+
+def _apply_stage2_uncertainty(
+    label: str, confidence: float, probs: list[float]
+) -> tuple[str, float]:
+    if not STAGE2_UNCERTAINTY_ENABLED:
+        return label, confidence
+
+    sorted_probs = sorted(probs, reverse=True)
+    top_score = float(sorted_probs[0]) if sorted_probs else 0.0
+    second_score = float(sorted_probs[1]) if len(sorted_probs) > 1 else 0.0
+    margin = top_score - second_score
+    if top_score < STAGE2_UNCERTAINTY_MIN_CONFIDENCE or margin < STAGE2_UNCERTAINTY_MIN_MARGIN:
+        return "Other", round(top_score, 3)
+
     return label, confidence
 
 
@@ -553,9 +586,15 @@ async def _analyze_internal(
         predictions = _build_mock_predictions(image_bytes, selected_profile)
         stage2_override: tuple[str, float] | None = None
         if ENABLE_H5_MODEL:
-            stage2_override = _run_h5_stage2_prediction(image_bytes)
+            stage2_label, stage2_confidence, stage2_probs = _run_h5_stage2_prediction(
+                image_bytes
+            )
+            stage2_label, stage2_confidence = _apply_stage2_uncertainty(
+                stage2_label, stage2_confidence, stage2_probs
+            )
+            stage2_override = (stage2_label, stage2_confidence)
             predictions = _apply_stage2_signal_to_predictions(
-                predictions, stage2_override[0], stage2_override[1]
+                predictions, stage2_label, stage2_confidence
             )
         payload = _build_pipeline_outputs(
             predictions,
