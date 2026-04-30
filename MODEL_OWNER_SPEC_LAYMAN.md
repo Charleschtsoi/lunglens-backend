@@ -61,6 +61,12 @@ Expected classes:
 
 Important: tell us exact index order (0/1/2).
 
+For this current Stage-2 model path, please also follow:
+- RGB image
+- resize to `224x224`
+- normalize by `/255.0`
+- no extra `resnet_v2.preprocess_input`
+
 ### C) Clinical/tabular model (questionnaire)
 
 Expected outputs:
