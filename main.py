@@ -3,6 +3,7 @@ import os
 import base64
 import random
 import math
+import logging
 from io import BytesIO
 from typing import Any
 
@@ -55,6 +56,7 @@ def _parse_float_env(name: str, default: float) -> float:
 
 
 app = FastAPI(title="LungLens API")
+logger = logging.getLogger("lunglens.backend")
 
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development").strip().lower()
 ALLOWED_ORIGINS = _parse_origins(
@@ -216,12 +218,21 @@ H5_MODEL: Any = None
 H5_MODEL_LOAD_ERROR: str | None = None
 
 
-def _error_response(message: str, status_code: int) -> JSONResponse:
+def _error_response(
+    message: str,
+    status_code: int,
+    error_code: str = "internal_error",
+    stage: str = "pipeline",
+    retryable: bool = False,
+) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
         content={
             "success": False,
             "error": message,
+            "error_code": error_code,
+            "stage": stage,
+            "retryable": retryable,
         },
     )
 
@@ -252,9 +263,21 @@ def _validate_api_key(x_api_key: str | None) -> JSONResponse | None:
     if not REQUIRE_API_KEY:
         return None
     if not API_KEY:
-        return _error_response("Server API key is not configured.", 500)
+        return _error_response(
+            "Server API key is not configured.",
+            500,
+            error_code="invalid_api_key",
+            stage="pipeline",
+            retryable=False,
+        )
     if x_api_key != API_KEY:
-        return _error_response("Unauthorized.", 401)
+        return _error_response(
+            "Unauthorized.",
+            401,
+            error_code="invalid_api_key",
+            stage="pipeline",
+            retryable=False,
+        )
     return None
 
 
@@ -280,11 +303,65 @@ def _load_h5_model() -> None:
     try:
         import tensorflow as tf  # type: ignore
 
-        H5_MODEL = tf.keras.models.load_model(H5_MODEL_PATH)
+        H5_MODEL = tf.keras.models.load_model(H5_MODEL_PATH, compile=False)
         H5_MODEL_LOAD_ERROR = None
     except Exception as exc:
-        H5_MODEL = None
-        H5_MODEL_LOAD_ERROR = str(exc)
+        initial_error = str(exc)
+        try:
+            H5_MODEL = _load_h5_model_with_inputlayer_compat(tf, H5_MODEL_PATH)
+            H5_MODEL_LOAD_ERROR = None
+            logger.warning(
+                "Loaded H5 model with compatibility fallback after initial error: %s",
+                initial_error,
+            )
+            return
+        except Exception as compat_exc:
+            H5_MODEL = None
+            H5_MODEL_LOAD_ERROR = (
+                f"Initial load failed: {initial_error}. "
+                f"Compatibility fallback failed: {compat_exc}"
+            )
+
+
+def _sanitize_inputlayer_config(node: Any) -> Any:
+    if isinstance(node, dict):
+        config = node.get("config")
+        if isinstance(config, dict):
+            if "batch_shape" in config and "batch_input_shape" not in config:
+                config["batch_input_shape"] = config["batch_shape"]
+            config.pop("batch_shape", None)
+            config.pop("optional", None)
+        for value in node.values():
+            _sanitize_inputlayer_config(value)
+    elif isinstance(node, list):
+        for item in node:
+            _sanitize_inputlayer_config(item)
+    return node
+
+
+def _load_h5_model_with_inputlayer_compat(tf: Any, model_path: str) -> Any:
+    try:
+        import h5py  # type: ignore
+    except Exception as exc:
+        raise ValueError(
+            f"H5 model compatibility fallback requires h5py: {exc}"
+        ) from exc
+
+    with h5py.File(model_path, "r") as h5_file:
+        raw_config = h5_file.attrs.get("model_config")
+
+    if raw_config is None:
+        raise ValueError("H5 model has no model_config metadata.")
+
+    if isinstance(raw_config, bytes):
+        raw_config = raw_config.decode("utf-8")
+
+    model_config = json.loads(raw_config)
+    sanitized_config = _sanitize_inputlayer_config(model_config)
+    model_json = json.dumps(sanitized_config)
+    model = tf.keras.models.model_from_json(model_json)
+    model.load_weights(model_path)
+    return model
 
 
 def _run_h5_stage2_prediction(image_bytes: bytes) -> tuple[str, float, list[float]]:
@@ -439,6 +516,9 @@ def _build_pipeline_outputs(
     questionnaire_data: dict[str, Any] | None,
     heatmap_base64: str,
     stage2_override: tuple[str, float] | None = None,
+    run_mode: str = "mock",
+    stage2_status: str = "ok",
+    warnings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     top_prediction = max(predictions, key=predictions.get)
     top_confidence = float(predictions[top_prediction])
@@ -548,6 +628,53 @@ def _build_pipeline_outputs(
         "report": report,
         "timing_ms": timing_ms,
         "requires_questionnaire": requires_questionnaire,
+        "warnings": warnings or [],
+        "provenance": {
+            "run_mode": run_mode,
+            "stage1": {
+                "source": "mock",
+                "status": "ok",
+                "model_id": "mock-stage1",
+                "model_version": "demo-v1",
+            },
+            "stage2": {
+                "source": "model" if run_mode == "hybrid" else "mock",
+                "status": stage2_status,
+                "model_id": "resnet152v2_lung_disease_final.h5"
+                if run_mode == "hybrid"
+                else "mock-stage2",
+                "model_version": "pilot-v1" if run_mode == "hybrid" else "demo-v1",
+            },
+            "stage3": {
+                "source": "rule",
+                "status": "ok" if stage3 else "skipped",
+                "model_id": "clinical-rule-engine",
+                "model_version": "v1",
+            },
+            "stage4": {
+                "source": "rule",
+                "status": "ok" if report else "skipped",
+                "model_id": "report-template-engine",
+                "model_version": "v1",
+            },
+            "explanations": [
+                {
+                    "section": "pipeline-summary",
+                    "stage_keys": ["stage1", "stage2", "stage3"],
+                    "source_type": "model" if run_mode == "hybrid" else "mock",
+                },
+                {
+                    "section": "report-summary",
+                    "stage_keys": ["stage4"],
+                    "source_type": "rule",
+                },
+                {
+                    "section": "anatomy-guide",
+                    "stage_keys": ["pipeline"],
+                    "source_type": "static",
+                },
+            ],
+        },
     }
 
 
@@ -560,53 +687,114 @@ async def _analyze_internal(
             return auth_error
 
         if not image.filename:
-            return _error_response("Missing uploaded image filename.", 400)
+            return _error_response(
+                "Missing uploaded image filename.",
+                400,
+                error_code="missing_image",
+                stage="pipeline",
+                retryable=False,
+            )
 
         content_type = (image.content_type or "").lower()
         if content_type not in ALLOWED_IMAGE_MIME_TYPES:
             return _error_response(
-                f"Unsupported image content type: {content_type or 'unknown'}.", 415
+                f"Unsupported image content type: {content_type or 'unknown'}.",
+                415,
+                error_code="unsupported_file_type",
+                stage="pipeline",
+                retryable=False,
             )
 
         image_bytes = await image.read()
         if not image_bytes:
-            return _error_response("Uploaded image is empty.", 400)
+            return _error_response(
+                "Uploaded image is empty.",
+                400,
+                error_code="missing_image",
+                stage="pipeline",
+                retryable=False,
+            )
         if len(image_bytes) > MAX_UPLOAD_BYTES:
             return _error_response(
-                f"Uploaded image exceeds max size of {MAX_UPLOAD_MB} MB.", 413
+                f"Uploaded image exceeds max size of {MAX_UPLOAD_MB} MB.",
+                413,
+                error_code="payload_too_large",
+                stage="pipeline",
+                retryable=False,
             )
 
         try:
             Image.open(BytesIO(image_bytes)).verify()
         except Exception:
-            return _error_response("Uploaded file is not a valid image.", 400)
+            return _error_response(
+                "Uploaded file is not a valid image.",
+                400,
+                error_code="invalid_request",
+                stage="pipeline",
+                retryable=False,
+            )
 
         questionnaire_data = _safe_parse_questionnaire(questionnaire)
         selected_profile = _select_mock_profile(image_bytes, questionnaire_data)
         predictions = _build_mock_predictions(image_bytes, selected_profile)
         stage2_override: tuple[str, float] | None = None
+        run_mode = "mock"
+        stage2_status = "ok"
+        warnings: list[dict[str, Any]] = [
+            {
+                "code": "mock_scaffold_active",
+                "message": "Parts of this report use mock/rule-based scaffolding for educational output.",
+                "stage": "pipeline",
+            }
+        ]
         if ENABLE_H5_MODEL:
-            stage2_label, stage2_confidence, stage2_probs = _run_h5_stage2_prediction(
-                image_bytes
-            )
-            stage2_label, stage2_confidence = _apply_stage2_uncertainty(
-                stage2_label, stage2_confidence, stage2_probs
-            )
-            stage2_override = (stage2_label, stage2_confidence)
-            predictions = _apply_stage2_signal_to_predictions(
-                predictions, stage2_label, stage2_confidence
-            )
+            run_mode = "hybrid"
+            try:
+                stage2_label, stage2_confidence, stage2_probs = _run_h5_stage2_prediction(
+                    image_bytes
+                )
+                stage2_label, stage2_confidence = _apply_stage2_uncertainty(
+                    stage2_label, stage2_confidence, stage2_probs
+                )
+                stage2_override = (stage2_label, stage2_confidence)
+                predictions = _apply_stage2_signal_to_predictions(
+                    predictions, stage2_label, stage2_confidence
+                )
+            except ValueError as exc:
+                stage2_status = "fallback"
+                warnings.append(
+                    {
+                        "code": "stage2_model_unavailable",
+                        "message": f"Stage 2 model unavailable; using fallback behavior. {exc}",
+                        "stage": "stage2",
+                    }
+                )
         payload = _build_pipeline_outputs(
             predictions,
             questionnaire_data,
             heatmap_base64=MOCK_HEATMAPS[selected_profile["name"]],
             stage2_override=stage2_override,
+            run_mode=run_mode,
+            stage2_status=stage2_status,
+            warnings=warnings,
         )
         return JSONResponse(status_code=200, content=payload)
     except ValueError as exc:
-        return _error_response(str(exc), 400)
+        return _error_response(
+            str(exc),
+            400,
+            error_code="invalid_request",
+            stage="pipeline",
+            retryable=False,
+        )
     except Exception:
-        return _error_response("Internal server error.", 500)
+        return _error_response(
+            "Internal server error.",
+            500,
+            error_code="internal_error",
+            stage="pipeline",
+            retryable=True,
+        )
 
 
 @app.get("/")
@@ -631,7 +819,13 @@ async def request_validation_exception_handler(
     first_error = exc.errors()[0] if exc.errors() else {}
     error_loc = ".".join(str(part) for part in first_error.get("loc", []))
     error_msg = first_error.get("msg", "Invalid request input.")
-    return _error_response(f"{error_loc}: {error_msg}", 400)
+    return _error_response(
+        f"{error_loc}: {error_msg}",
+        400,
+        error_code="invalid_request",
+        stage="pipeline",
+        retryable=False,
+    )
 
 
 @app.on_event("startup")
@@ -717,7 +911,13 @@ async def assess_compat(
 
     report = payload.get("report")
     if report is None:
-        return _error_response("Unable to produce final report from assess inputs.", 400)
+        return _error_response(
+            "Unable to produce final report from assess inputs.",
+            400,
+            error_code="invalid_request",
+            stage="stage4",
+            retryable=False,
+        )
 
     return JSONResponse(
         status_code=200,
