@@ -331,6 +331,18 @@ def _sanitize_inputlayer_config(node: Any) -> Any:
                 config["batch_input_shape"] = config["batch_shape"]
             config.pop("batch_shape", None)
             config.pop("optional", None)
+            dtype_policy = config.get("dtype")
+            if isinstance(dtype_policy, dict):
+                # Older runtimes cannot deserialize newer policy objects.
+                # We only need inference compatibility, so use a plain dtype string.
+                policy_name = (
+                    dtype_policy.get("config", {}).get("name")
+                    if isinstance(dtype_policy.get("config"), dict)
+                    else None
+                )
+                config["dtype"] = (
+                    "float32" if policy_name == "mixed_float16" else policy_name
+                ) or "float32"
         for value in node.values():
             _sanitize_inputlayer_config(value)
     elif isinstance(node, list):
