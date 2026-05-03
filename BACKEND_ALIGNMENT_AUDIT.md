@@ -16,7 +16,7 @@ Frontend code audit is deferred (frontend repository path not provided in this w
 - API key auth exists and can be required (`X-API-Key`).
 - File validations exist (presence/type/size) with JSON error shape.
 - Gate-driven questionnaire behavior exists in analyze flow (`requires_questionnaire`).
-- Stage-2 `.h5` model switch is available via env vars for pilot mode.
+- ML Model 2 `.h5` switch is available via env vars for pilot mode.
 
 ## Misaligned
 

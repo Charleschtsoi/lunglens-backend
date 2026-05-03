@@ -8,23 +8,23 @@ It is intended to keep backend, frontend, and ML integration aligned during impl
 
 ## End-to-end pipeline (authoritative flow)
 
-1. **Stage 1: Binary pneumonia detection**
+1. **ML Model 1: Binary pneumonia detection**
    - Input: uploaded chest X-ray
    - Output: `Pneumonia` vs `Normal` + confidence
-2. **Stage 2: Multi-class disease classification**
+2. **ML Model 2: Multi-class disease classification**
    - Runs on the same uploaded image
    - Output: class label + confidence
 3. **Grad-CAM**
    - Generated from image model outputs
    - Always produced for explainability
 4. **Gate check**
-   - If both Stage 1 and Stage 2 are negative -> early stop
+   - If both ML Model 1 and ML Model 2 are negative -> early stop
    - If either is positive -> continue
-5. **Stage 3: Clinical Q&A (conditional)**
+5. **ML Model 3: Clinical Q&A (conditional)**
    - Triggered only when gate route is `continue`
    - Uses questionnaire inputs for severity/risk/recovery
-6. **Stage 4: Report synthesis**
-   - Aggregates outputs from Stage 1-3 + Grad-CAM
+6. **ML Model 4: Report synthesis**
+   - Aggregates outputs from ML Models 1–3 + Grad-CAM
    - Produces human-readable summary, actions, and disclaimer
 
 ## Deployment architecture decision
@@ -44,26 +44,26 @@ Current backend response shape that frontend depends on:
   - `heatmap_base64`
   - `top_prediction`
   - `confidence`
-- `stage1`
-- `stage2`
+- `model1`
+- `model2`
 - `gate`
-- `stage3`
-- `report`
+- `model3`
+- `model4`
 - `timing_ms`
 - `requires_questionnaire`
 
 Any future model integration (ResNet152 or others) should replace internals only and preserve these keys.
 
-## Stage behavior contract
+## Gate and model-output contract
 
 - If gate route is `early_stop`:
   - Backend may return minimal downstream data and stop early semantics.
 - If gate route is `continue` and questionnaire is missing:
   - `requires_questionnaire: true`
-  - `report: null`
+  - `model4: null`
 - If questionnaire is present:
   - `requires_questionnaire: false`
-  - include `stage3` and `report`
+  - include `model3` and `model4`
 
 ## ML integration checkpoints
 
@@ -78,10 +78,10 @@ When replacing mock inference with trained model inference:
 
 ## Known class-label alignment note
 
-The proposal text describes Stage 2 classes as `Normal / Bacterial / Viral / Other`.
+The proposal text describes ML Model 2 classes as `Normal / Bacterial / Viral / Other`.
 Current backend uses `Normal / Lung Opacity / Viral Pneumonia / Other`.
 
-Team should confirm one canonical Stage 2 label taxonomy and use it consistently across:
+Team should confirm one canonical ML Model 2 label taxonomy and use it consistently across:
 
 - training labels
 - backend response

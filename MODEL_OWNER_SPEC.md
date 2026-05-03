@@ -18,11 +18,11 @@ Backend response keys that must remain present:
 - `success`
 - `predictions`
 - `gradcam`
-- `stage1`
-- `stage2`
+- `model1`
+- `model2`
 - `gate`
-- `stage3`
-- `report`
+- `model3`
+- `model4`
 - `timing_ms`
 - `requires_questionnaire`
 
@@ -53,16 +53,16 @@ Example questionnaire:
 
 - If `gate.route == "continue"` and questionnaire is missing:
   - `requires_questionnaire: true`
-  - `report: null`
+  - `model4: null`
 - If questionnaire is present:
   - `requires_questionnaire: false`
-  - include `stage3` + `report`
+  - include `model3` + `model4`
 
 [Back to Steps](#quick-step-navigation) | [Next: Step 2](#step-2-per-model-output-requirements)
 
 ## Step 2: Per-Model Output Requirements
 
-### A) Stage 1 - Binary Pneumonia Model
+### A) ML Model 1 — Binary Pneumonia Model
 
 Dataset: Kaggle pediatric X-ray (Normal vs Pneumonia).
 
@@ -71,8 +71,8 @@ Accepted raw outputs:
 - Softmax: `[p_normal, p_pneumonia]`
 
 Must map to:
-- `stage1.label` in `{"Pneumonia", "Normal"}`
-- `stage1.confidence` in `[0,1]`
+- `model1.label` in `{"Pneumonia", "Normal"}`
+- `model1.confidence` in `[0,1]`
 
 Recommended label order:
 
@@ -80,7 +80,7 @@ Recommended label order:
 ["Normal", "Pneumonia"]
 ```
 
-### B) Stage 2 - Multi-Class Image Model
+### B) ML Model 2 — Multi-Class Image Model
 
 Dataset: Normal / Lung Opacity / Viral Pneumonia.
 
@@ -93,7 +93,7 @@ Canonical order:
 ["Normal", "Lung Opacity", "Viral Pneumonia"]
 ```
 
-Canonical preprocessing for current Stage-2 `.h5` integration:
+Canonical preprocessing for current ML Model 2 `.h5` integration:
 
 - RGB input
 - resize to `224x224`
@@ -101,10 +101,10 @@ Canonical preprocessing for current Stage-2 `.h5` integration:
 - do not apply `resnet_v2.preprocess_input` in this path
 
 Must map to:
-- `stage2.label` in `{"Normal", "Lung Opacity", "Viral Pneumonia", "Other"}`
-- `stage2.confidence` in `[0,1]`
+- `model2.label` in `{"Normal", "Lung Opacity", "Viral Pneumonia", "Other"}`
+- `model2.confidence` in `[0,1]`
 
-### C) Stage 3 - Structured Clinical Model
+### C) ML Model 3 — Structured Clinical Model
 
 Dataset: tabular records (age, gender, smoking status, lung capacity, treatment/recovery-related fields).
 
@@ -113,7 +113,7 @@ Required outputs:
 - `risk_level` in `{"low", "medium", "high"}`
 - `recovery_outlook` in `{"favorable", "guarded", "uncertain"}`
 
-This becomes backend `stage3`.
+This becomes backend `model3`.
 
 ### D) Optional MIMIC-CXR Track
 
@@ -174,7 +174,7 @@ No integration starts until all 5 are provided.
 
 - Label order verified against `labels.json`
 - Preprocessing exactly matches training pipeline
-- Output maps correctly to stage schema
+- Output maps correctly to model1–model4 schema
 - API contract keys unchanged
 - Error handling still valid (`401`, `413`, `415`, `400`, `500`)
 - End-to-end sample request works on:
@@ -186,7 +186,7 @@ No integration starts until all 5 are provided.
 ```md
 Model owner:
 Model name/version:
-Task stage (1/2/3/optional):
+Task model slot (1/2/3/optional):
 Dataset used:
 
 Class order (exact):

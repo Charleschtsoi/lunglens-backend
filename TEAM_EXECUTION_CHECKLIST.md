@@ -4,7 +4,7 @@ Use this as the operational checklist for the multi-dataset adoption cycle.
 
 ## Week 1 - Freeze and Governance
 
-- [ ] Confirm canonical Stage 1 and Stage 2 label taxonomy.
+- [ ] Confirm canonical ML Model 1 and ML Model 2 label taxonomy.
 - [ ] Freeze backend response contract keys (no breaking changes).
 - [ ] Publish model registry fields: `model_id`, `dataset`, `task`, `version`, `owner`, `status`.
 - [ ] Set KPI acceptance thresholds (AUC/F1/latency).

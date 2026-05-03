@@ -14,7 +14,7 @@ Confirm whether LungLens should proceed with a multi-dataset, multi-model archit
 
 - Team-level parallelization: model owners can train independently, reducing project bottlenecks.
 - Clinical value: separate models capture complementary signals (binary triage + multi-class pathology + conditional clinical risk).
-- Technical fit: existing backend contract already supports staged routing (`stage1`, `stage2`, `gate`, `stage3`, `report`).
+- Technical fit: existing backend contract already supports multi-model routing (`model1`, `model2`, `gate`, `model3`, `model4`).
 
 ## Cost and Feasibility Summary (Budgetary)
 

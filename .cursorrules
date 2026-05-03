@@ -31,6 +31,10 @@
 - Perform backend-side validation (auth, type, size) and preprocessing.
 - Keep CORS restricted to intended frontend domains via env vars.
 - Keep secrets in environment/secrets, never hardcoded.
+- Treat ML as core product behavior, not optional scaffolding:
+  - prioritize root-cause fixes for model loading/inference issues,
+  - do not silently bypass real models with mock-only workarounds unless explicitly approved as temporary,
+  - document any temporary fallback and create a clear path back to real model execution.
 
 ## Warm-Up and Health
 

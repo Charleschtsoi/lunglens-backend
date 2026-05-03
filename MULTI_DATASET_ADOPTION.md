@@ -10,7 +10,7 @@ Adopting multiple datasets and independently owned model tracks is valid for thi
 
 - Delivery: parallel model ownership lowers team bottlenecks and improves throughput.
 - Product: combining broad-screening models and specialized models increases coverage for clinically relevant findings.
-- Architecture: current backend contract already supports staged inference (`stage1`, `stage2`, `gate`, `stage3`, `report`) and can hide internal model growth behind stable output keys.
+- Architecture: current backend contract already supports multi-model inference (`model1`, `model2`, `gate`, `model3`, `model4`) and can hide internal model growth behind stable output keys.
 
 ### Strategy guardrails (required)
 
@@ -25,7 +25,7 @@ To avoid over-complexity from 4+ models, enforce these controls:
    - Only one active production version per task; others stay in shadow/candidate mode.
 
 3. Label taxonomy freeze
-   - Define one canonical label dictionary for Stage 1/2 display terms.
+   - Define one canonical label dictionary for ML Model 1/2 display terms.
    - Block deployment if training label order or names diverge from canonical mapping.
 
 4. Routing policy
@@ -39,7 +39,7 @@ To avoid over-complexity from 4+ models, enforce these controls:
 ### API contract stability checklist
 
 - Do not remove or rename:
-  - `predictions`, `gradcam`, `stage1`, `stage2`, `gate`, `stage3`, `report`, `timing_ms`, `requires_questionnaire`.
+  - `predictions`, `gradcam`, `model1`, `model2`, `gate`, `model3`, `model4`, `timing_ms`, `requires_questionnaire`.
 - Preserve `gate`-driven questionnaire behavior.
 - Preserve error structure (`success: false`, `error`).
 - Expose model expansion internally; frontend should not need to know model count.
@@ -137,7 +137,7 @@ Scope should stay moderate by preserving API shape and improving resilience for 
 
 ### Week 1: Contract and KPI freeze
 
-- Freeze canonical Stage 2 labels and response contract.
+- Freeze canonical ML Model 2 labels and response contract.
 - Publish model registry template and promotion policy.
 - Finalize spend cap and baseline KPI targets.
 

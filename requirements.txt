@@ -2,6 +2,14 @@ fastapi==0.115.2
 uvicorn==0.30.6
 pydantic==2.9.2
 python-multipart==0.0.9
+python-dotenv==1.0.1
 pillow==10.4.0
 numpy==1.26.4
-tensorflow==2.15.1
+h5py==3.11.0
+# Pin matches training (2.18); 2.15 fails on some Colab-exported H5 graphs.
+tensorflow==2.18.0
+# ML Model 1: torchvision ResNet50 (.pth state_dict)
+torch
+torchvision
+# DenseNet-121 /predict/densenet: Grad-CAM (PyPI name is grad-cam; import pytorch_grad_cam)
+grad-cam>=1.4.8
