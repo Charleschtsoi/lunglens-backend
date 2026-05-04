@@ -25,7 +25,7 @@ ENVIRONMENT=development \
 REQUIRE_API_KEY=false \
 ENABLE_MODEL2_H5=true \
 H5_MODEL2_PATH="/absolute/path/to/resnet152v2_lung_disease_final.h5" \
-H5_MODEL2_LABELS="Lung_Opacity,Normal,Viral_Pneumonia" \
+H5_MODEL2_LABELS="Normal,Lung_Opacity,Viral_Pneumonia" \
 uvicorn main:app --host 127.0.0.1 --port 7860
 ```
 

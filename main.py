@@ -4,12 +4,11 @@ import logging
 import os
 import shutil
 import base64
-import random
 import math
 import tempfile
 import time
 from io import BytesIO
-from typing import Any
+from typing import Any, List
 
 from fastapi import FastAPI, File, Form, Header, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -41,6 +40,30 @@ class PatientData(BaseModel):
     cough_duration_days: int
     smoking: str | None = None
     breathing_difficulty: str | None = None
+
+
+class QuestionRequest(BaseModel):
+    high_attention_findings: List[str]
+
+
+class QuestionItem(BaseModel):
+    id: str
+    text: str
+    finding_trigger: str
+
+
+CLINICAL_DICTIONARY: dict[str, list[str]] = {
+    "Pneumonia": [
+        "The AI flagged a pattern similar to pneumonia. Based on my symptoms, what follow-up tests or visits do you recommend?",
+        "Should I be concerned about this viral pattern, and does it require immediate treatment?",
+    ],
+    "Infiltration": [
+        "The educational output weighted Infiltration. How does that line up with your clinical impression?",
+    ],
+    "Pleural_Thickening": [
+        "I noticed the AI highlighted areas associated with Pleural thickening—could you explain what that region shows on my film?",
+    ],
+}
 
 
 def _parse_bool_env(name: str, default: bool) -> bool:
@@ -79,13 +102,13 @@ H5_MODEL2_PATH = (
     or os.getenv("H5_MODEL_PATH", "models/resnet152v2_lung_disease_final.h5")
 ).strip()
 # Class index i = argmax(probs)[i] must match training output order exactly.
-# Example: Keras flow_from_directory often yields alphabetical folders:
-#   Lung_Opacity, Normal, Viral_Pneumonia → [0]=Lung_Opacity, [1]=Normal, [2]=Viral_Pneumonia.
-# If your checkpoint uses Normal at index 0, set e.g. Normal,Lung_Opacity,Viral_Pneumonia via env.
+# Default: [0]=Normal, [1]=Lung_Opacity, [2]=Viral_Pneumonia.
+# If training used a different order (e.g. alphabetical folders → Lung_Opacity,Normal,Viral_Pneumonia),
+# set H5_MODEL2_LABELS to match the checkpoint.
 # Override: H5_MODEL2_LABELS (legacy: H5_STAGE2_LABELS).
 H5_MODEL2_LABELS = _parse_csv(
     os.getenv("H5_MODEL2_LABELS")
-    or os.getenv("H5_STAGE2_LABELS", "Lung_Opacity,Normal,Viral_Pneumonia")
+    or os.getenv("H5_STAGE2_LABELS", "Normal,Lung_Opacity,Viral_Pneumonia")
 )
 # Prefer ENABLE_MODEL1; legacy ENABLE_MODEL1_PYTORCH honored if the new key is unset.
 if os.getenv("ENABLE_MODEL1") is not None:
@@ -136,115 +159,28 @@ app.add_middleware(
 )
 
 
-LABELS = [
-    "Atelectasis",
-    "Cardiomegaly",
-    "Effusion",
-    "Infiltration",
-    "Mass",
-    "Nodule",
-    "Pneumonia",
-    "Pneumothorax",
-    "Consolidation",
-    "Edema",
-    "Emphysema",
-    "Fibrosis",
-    "Pleural_Thickening",
-    "Hernia",
-]
-
-MOCK_PROFILES = [
-    {
-        "name": "pneumonia_focus",
-        "offset": 11,
-        "boost_labels": {"Pneumonia", "Infiltration", "Consolidation"},
-        "suppress_labels": {"Hernia", "Fibrosis"},
-        "hotspots": [
-            (0.42, 0.36, 1.0, 0.14),
-            (0.58, 0.52, 0.75, 0.19),
-        ],
-    },
-    {
-        "name": "edema_focus",
-        "offset": 37,
-        "boost_labels": {"Edema", "Effusion", "Cardiomegaly"},
-        "suppress_labels": {"Pneumothorax", "Mass"},
-        "hotspots": [
-            (0.50, 0.45, 1.0, 0.18),
-            (0.34, 0.57, 0.65, 0.16),
-        ],
-    },
-    {
-        "name": "mostly_normal",
-        "offset": 73,
-        "boost_labels": {"Nodule", "Pleural_Thickening"},
-        "suppress_labels": {"Pneumonia", "Edema", "Infiltration", "Effusion"},
-        "hotspots": [
-            (0.46, 0.42, 0.55, 0.11),
-            (0.62, 0.35, 0.45, 0.09),
-        ],
-    },
-]
-
-
 def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, value))
 
 
-def _gradcam_color(intensity: float) -> tuple[int, int, int]:
-    # Grad-CAM-like colormap: deep blue -> cyan -> yellow -> red.
-    t = _clamp01(intensity)
-    if t < 0.35:
-        p = t / 0.35
-        r = int(10 + p * 30)
-        g = int(20 + p * 140)
-        b = int(100 + p * 155)
-    elif t < 0.7:
-        p = (t - 0.35) / 0.35
-        r = int(40 + p * 215)
-        g = int(160 + p * 70)
-        b = int(255 - p * 185)
-    else:
-        p = (t - 0.7) / 0.3
-        r = 255
-        g = int(230 - p * 170)
-        b = int(70 - p * 45)
-    return r, g, b
+def _square_224_pil_geometry() -> Any:
+    """Short-edge resize then center-crop to 224×224 (aspect-preserving vs naive square resize)."""
+    from torchvision import transforms
+    from torchvision.transforms import InterpolationMode
+
+    return transforms.Compose(
+        [
+            transforms.Resize(256, interpolation=InterpolationMode.BILINEAR),
+            transforms.CenterCrop(224),
+        ]
+    )
 
 
-def _create_placeholder_heatmap_base64(
-    hotspots: list[tuple[float, float, float, float]], size: int = 256
-) -> str:
-    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+def _encode_rgb_pil_png_base64(pil_img: Image.Image) -> str:
+    buf = BytesIO()
+    pil_img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
 
-    for y in range(size):
-        for x in range(size):
-            nx = x / (size - 1)
-            ny = y / (size - 1)
-            intensity = 0.0
-            for cx, cy, amplitude, sigma in hotspots:
-                dx = nx - cx
-                dy = ny - cy
-                gaussian = amplitude * math.exp(-((dx * dx + dy * dy) / (2 * sigma * sigma)))
-                intensity += gaussian
-
-            intensity = _clamp01(intensity)
-            if intensity < 0.05:
-                continue
-
-            alpha = int(20 + intensity * 210)
-            red, green, blue = _gradcam_color(intensity)
-            image.putpixel((x, y), (red, green, blue, alpha))
-
-    buffer = BytesIO()
-    image.save(buffer, format="PNG")
-    return base64.b64encode(buffer.getvalue()).decode("ascii")
-
-
-MOCK_HEATMAPS = {
-    profile["name"]: _create_placeholder_heatmap_base64(profile["hotspots"])
-    for profile in MOCK_PROFILES
-}
 
 MODEL1_PT: Any = None
 MODEL1_PT_LOAD_ERROR: str | None = None
@@ -364,7 +300,7 @@ def _model1_preprocess() -> Any:
 
         _MODEL1_PREPROCESS = transforms.Compose(
             [
-                transforms.Resize((224, 224)),
+                _square_224_pil_geometry(),
                 transforms.ToTensor(),
                 transforms.Normalize(
                     mean=[0.485, 0.456, 0.406],
@@ -450,7 +386,8 @@ def _run_pytorch_model1_full(
         MODEL1_LABELS[i]: round(float(probs[0, i].item()), 4) for i in range(3)
     }
 
-    rgb_display = np.array(img.resize((224, 224))).astype(np.float32) / 255.0
+    cropped224 = _square_224_pil_geometry()(img)
+    rgb_display = np.array(cropped224).astype(np.float32) / 255.0
     rgb_display = np.clip(rgb_display, 0.0, 1.0)
     target_layers = [MODEL1_PT.layer4[-1]]
     gradcam_b64: str | None = None
@@ -489,7 +426,7 @@ def _densenet121_preprocess() -> Any:
 
         _DENSENET121_PREPROCESS = transforms.Compose(
             [
-                transforms.Resize((224, 224)),
+                _square_224_pil_geometry(),
                 transforms.ToTensor(),
                 transforms.Normalize(
                     mean=[0.485, 0.456, 0.406],
@@ -580,8 +517,10 @@ def _densenet121_predict_and_cam(image_bytes: bytes) -> dict[str, Any]:
         for i in range(3)
     }
 
-    rgb_display = np.array(img.resize((224, 224))).astype(np.float32) / 255.0
+    cropped224 = _square_224_pil_geometry()(img)
+    rgb_display = np.array(cropped224).astype(np.float32) / 255.0
     rgb_display = np.clip(rgb_display, 0.0, 1.0)
+    input_preview_b64 = _encode_rgb_pil_png_base64(cropped224)
 
     target_layers = [MODEL_DENSENET121.features.denseblock4]
     gradcam_b64 = _pytorch_gradcam_to_png_base64(
@@ -593,22 +532,8 @@ def _densenet121_predict_and_cam(image_bytes: bytes) -> dict[str, Any]:
         "confidence": round(confidence_frac * 100.0, 2),
         "probabilities": probabilities,
         "gradcam": gradcam_b64,
+        "input_preview_base64": input_preview_b64,
     }
-
-
-def _apply_model1_to_predictions(
-    predictions: dict[str, float], model1_label: str, model1_confidence: float
-) -> dict[str, float]:
-    """Nudge 14-label mock scaffold from ML Model 1 triage (educational UI)."""
-    out = dict(predictions)
-    c = max(0.0, min(1.0, model1_confidence))
-    if model1_label == "Normal":
-        out["Pneumonia"] = min(out["Pneumonia"], 0.28)
-        out["Infiltration"] = min(out["Infiltration"], 0.32)
-    elif model1_label in ("Pneumonia-Bacteria", "Pneumonia-Virus"):
-        out["Pneumonia"] = max(out["Pneumonia"], min(1.0, c))
-        out["Infiltration"] = max(out["Infiltration"], min(1.0, c * 0.88))
-    return {k: round(float(v), 3) for k, v in out.items()}
 
 
 def _model2_h5_path_diagnostics() -> dict[str, Any]:
@@ -812,24 +737,6 @@ def _run_h5_model2(image_bytes: bytes) -> tuple[str, float]:
     return label, confidence
 
 
-def _apply_model2_to_predictions(
-    predictions: dict[str, float], model2_label: str, model2_confidence: float
-) -> dict[str, float]:
-    out = dict(predictions)
-    c = max(0.0, min(1.0, model2_confidence))
-    if model2_label == "Normal":
-        out["Pneumonia"] = min(out["Pneumonia"], 0.25)
-        out["Infiltration"] = min(out["Infiltration"], 0.25)
-        out["Edema"] = min(out["Edema"], 0.35)
-    elif model2_label == "Lung Opacity":
-        out["Edema"] = max(out["Edema"], min(1.0, c))
-        out["Infiltration"] = max(out["Infiltration"], min(1.0, c * 0.9))
-    elif model2_label == "Viral Pneumonia":
-        out["Pneumonia"] = max(out["Pneumonia"], min(1.0, c))
-        out["Infiltration"] = max(out["Infiltration"], min(1.0, c * 0.85))
-    return {k: round(float(v), 3) for k, v in out.items()}
-
-
 def _error_response(message: str, status_code: int) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
@@ -936,28 +843,6 @@ def _validate_api_key(x_api_key: str | None) -> JSONResponse | None:
     return None
 
 
-def _build_mock_predictions(image_bytes: bytes, profile: dict[str, Any]) -> dict[str, float]:
-    if not image_bytes:
-        raise ValueError("Uploaded image is empty.")
-
-    checksum = sum(image_bytes) % 1000
-    predictions: dict[str, float] = {}
-    offset = int(profile["offset"])
-    boost_labels = set(profile["boost_labels"])
-    suppress_labels = set(profile["suppress_labels"])
-
-    for idx, label in enumerate(LABELS):
-        score = ((checksum + (idx + 1) * (29 + offset)) % 100) / 100.0
-        if label in boost_labels:
-            score = score * 0.5 + 0.42
-        if label in suppress_labels:
-            score = score * 0.45
-        score = _clamp01(score + random.uniform(-0.03, 0.03))
-        predictions[label] = round(score, 3)
-
-    return predictions
-
-
 def _densenet_analyze_error_payload(message: str | None = None) -> dict[str, Any]:
     return {
         "error": message or "Model not available",
@@ -984,52 +869,47 @@ def _build_pipeline_outputs(
     densenet_block = densenet_payload or _densenet_analyze_error_payload()
     densenet_neural_ok = "prediction" in densenet_block and "error" not in densenet_block
 
-    top_prediction = max(predictions, key=predictions.get)
-    top_confidence = float(predictions[top_prediction])
+    pred = {k: float(v) for k, v in predictions.items()}
+    if not pred:
+        pred = {"Normal": 1.0}
 
-    pneumonia_score = float(predictions["Pneumonia"])
-    edema_score = float(predictions["Edema"])
-    infiltration_score = float(predictions["Infiltration"])
+    keys = set(pred.keys())
+    gate_route = "early_stop" if keys == {"Normal"} else "continue"
+    gate_reason = "positive_detected" if gate_route == "continue" else "both_negative"
 
-    if model1_override is not None:
+    if keys == {"Normal"}:
+        top_prediction = "Normal"
+        top_confidence = float(pred["Normal"])
+    else:
+        non_normal = {k: float(v) for k, v in pred.items() if k != "Normal"}
+        if non_normal:
+            top_prediction = max(non_normal, key=non_normal.get)
+            top_confidence = float(non_normal[top_prediction])
+        else:
+            top_prediction = "Normal"
+            top_confidence = float(pred.get("Normal", 1.0))
+
+    if model1_pytorch_inference_ok and model1_override is not None:
         model1_label, model1_confidence = model1_override
         model1_confidence = round(float(model1_confidence), 3)
-        if model1_label == "Normal":
-            model1_positive_score = 1.0 - model1_confidence
-        else:
-            model1_positive_score = model1_confidence
+        model1_positive_score = (
+            1.0 - model1_confidence if model1_label == "Normal" else model1_confidence
+        )
     else:
-        model1_positive_score = max(pneumonia_score, infiltration_score)
-        model1_label = "Pneumonia" if model1_positive_score >= 0.5 else "Normal"
-        model1_confidence = round(
-            model1_positive_score
-            if model1_label == "Pneumonia"
-            else 1 - model1_positive_score,
-            3,
+        model1_label = "Normal"
+        model1_confidence = 1.0
+        model1_positive_score = max(
+            float(pred.get("Pneumonia", 0.0)),
+            float(pred.get("Infiltration", 0.0)),
+            float(pred.get("COVID-19", 0.0)),
         )
 
-    if model2_override is not None:
+    if model2_h5_inference_ok and model2_override is not None:
         model2_label, model2_confidence = model2_override
         model2_confidence = round(float(model2_confidence), 3)
-    elif model1_label == "Normal":
-        model2_label = "Normal"
-        model2_confidence = round(max(0.55, 1 - edema_score), 3)
-    elif edema_score > 0.65:
-        model2_label = "Lung Opacity"
-        model2_confidence = round(edema_score, 3)
-    elif pneumonia_score >= infiltration_score:
-        model2_label = "Viral Pneumonia"
-        model2_confidence = round(pneumonia_score, 3)
     else:
-        model2_label = "Other"
-        model2_confidence = round(infiltration_score, 3)
-
-    gate_route = (
-        "continue"
-        if (model1_label != "Normal" or model2_label != "Normal")
-        else "early_stop"
-    )
-    gate_reason = "positive_detected" if gate_route == "continue" else "both_negative"
+        model2_label = "Normal"
+        model2_confidence = 1.0
 
     questionnaire_complete = _questionnaire_satisfied(questionnaire_data)
     requires_questionnaire = gate_route == "continue" and not questionnaire_complete
@@ -1099,7 +979,7 @@ def _build_pipeline_outputs(
                 "Repeat imaging or follow-up per clinical protocol if needed.",
             ],
             "disclaimer": (
-                "This is a PoC mock output and not a medical diagnosis."
+                "This is an educational synthesis and not a medical diagnosis."
             ),
         }
 
@@ -1115,8 +995,12 @@ def _build_pipeline_outputs(
         "total": round(t1 + t2 + t_dn + model4_timing, 2),
     }
 
-    any_neural_ok = model1_pytorch_inference_ok or model2_h5_inference_ok
-    run_mode = "hybrid" if any_neural_ok else "mock"
+    any_neural_ok = (
+        model1_pytorch_inference_ok
+        or model2_h5_inference_ok
+        or densenet_neural_ok
+    )
+    run_mode = "hybrid" if any_neural_ok else "rules"
     if model1_pytorch_inference_ok:
         model1_status = "ok"
     elif not ENABLE_MODEL1:
@@ -1149,18 +1033,12 @@ def _build_pipeline_outputs(
         "model3_result": model3_flat_result,
         "clinical_risk_result": "rules" if clinical_risk_payload else "skipped",
         "gate_decision": "rules",
-        "findings": "mock",
+        "findings": "rules",
         "doctor_questions": "rules",
         "report_summary": "rules",
         "anatomy_guide": "static",
     }
-    warnings = [
-        {
-            "code": "mock_scaffold_active",
-            "message": "Parts of this report use mock/rule-based scaffolding for educational output.",
-            "scope": "pipeline",
-        }
-    ]
+    warnings: list[dict[str, Any]] = []
 
     return {
         "success": True,
@@ -1203,21 +1081,21 @@ def _build_pipeline_outputs(
             "run_mode": run_mode,
             **provenance_flat,
             "model1": {
-                "source": "model" if model1_pytorch_inference_ok else "mock",
+                "source": "model" if model1_pytorch_inference_ok else "rules",
                 "status": model1_status,
                 "model_id": "resnet50-3class"
                 if model1_pytorch_inference_ok
-                else "mock-model1",
-                "model_version": "v1" if model1_pytorch_inference_ok else "demo-v1",
+                else "resnet50-3class-unavailable",
+                "model_version": "v1" if model1_pytorch_inference_ok else "n/a",
             },
             "model2": {
-                "source": "model" if model2_h5_inference_ok else "mock",
+                "source": "model" if model2_h5_inference_ok else "rules",
                 "status": model2_status,
-                "model_id": "h5-model2" if model2_h5_inference_ok else "mock-model2",
-                "model_version": "pilot" if model2_h5_inference_ok else "demo-v1",
+                "model_id": "h5-model2" if model2_h5_inference_ok else "h5-model2-unavailable",
+                "model_version": "pilot" if model2_h5_inference_ok else "n/a",
             },
             "model3": {
-                "source": "model" if densenet_neural_ok else "mock",
+                "source": "model" if densenet_neural_ok else "rules",
                 "status": (
                     "ok"
                     if densenet_neural_ok
@@ -1270,26 +1148,23 @@ async def _analyze_internal(
             return _error_response("Uploaded file is not a valid image.", 400)
 
         questionnaire_data = _safe_parse_questionnaire(questionnaire)
-        selected_profile = random.choice(MOCK_PROFILES)
-        predictions = _build_mock_predictions(image_bytes, selected_profile)
 
         model1_override: tuple[str, float] | None = None
         model1_pytorch_inference_ok = False
         model1_gradcam_b64: str | None = None
         model1_probabilities: dict[str, float] | None = None
+        m1_label = "Normal"
+        m1_conf_r = 0.0
         t_model1_start = time.perf_counter()
         if ENABLE_MODEL1 and MODEL1_PT is not None:
             try:
-                m1_label, m1_conf, m1_probs, m1_gc = _run_pytorch_model1_full(
-                    image_bytes
+                m1_label, m1_conf, m1_probs, m1_gc = await asyncio.to_thread(
+                    _run_pytorch_model1_full, image_bytes
                 )
                 m1_conf_r = round(float(m1_conf), 3)
                 model1_override = (m1_label, m1_conf_r)
                 model1_gradcam_b64 = m1_gc
                 model1_probabilities = m1_probs
-                predictions = _apply_model1_to_predictions(
-                    predictions, m1_label, m1_conf_r
-                )
                 model1_pytorch_inference_ok = True
             except Exception as exc:
                 logger.warning("ML Model 1 PyTorch inference failed: %s", exc)
@@ -1297,15 +1172,16 @@ async def _analyze_internal(
 
         model2_override: tuple[str, float] | None = None
         model2_h5_inference_ok = False
+        h5_label = "Normal"
+        h5_conf_r = 0.0
         t_model2_start = time.perf_counter()
         if ENABLE_MODEL2_H5 and MODEL2_H5 is not None:
             try:
-                h5_label, h5_conf = _run_h5_model2(image_bytes)
+                h5_label, h5_conf = await asyncio.to_thread(
+                    _run_h5_model2, image_bytes
+                )
                 h5_conf_r = round(float(h5_conf), 3)
                 model2_override = (h5_label, h5_conf_r)
-                predictions = _apply_model2_to_predictions(
-                    predictions, h5_label, h5_conf_r
-                )
                 model2_h5_inference_ok = True
             except Exception as exc:
                 logger.warning("ML Model 2 H5 inference failed: %s", exc)
@@ -1316,7 +1192,9 @@ async def _analyze_internal(
         if ENABLE_DENSENET121 and MODEL_DENSENET121 is not None:
             t_dn0 = time.perf_counter()
             try:
-                dn = _densenet121_predict_and_cam(image_bytes)
+                dn = await asyncio.to_thread(
+                    _densenet121_predict_and_cam, image_bytes
+                )
                 densenet_payload = {**dn, "model_name": "DenseNet-121"}
             except Exception as exc:
                 logger.warning(
@@ -1328,10 +1206,26 @@ async def _analyze_internal(
                 )
             timing_densenet_ms = (time.perf_counter() - t_dn0) * 1000.0
 
+        densenet_neural_ok = (
+            "prediction" in densenet_payload and "error" not in densenet_payload
+        )
+        predictions: dict[str, float] = {}
+        if model1_pytorch_inference_ok and m1_label != "Normal":
+            base = "Pneumonia" if "Pneumonia" in m1_label else m1_label
+            predictions[base] = max(predictions.get(base, 0.0), m1_conf_r)
+        if model2_h5_inference_ok and h5_label != "Normal":
+            predictions[h5_label] = max(predictions.get(h5_label, 0.0), h5_conf_r)
+        if densenet_neural_ok and densenet_payload.get("prediction") != "Normal":
+            m3_pred = str(densenet_payload["prediction"])
+            m3_conf = float(densenet_payload["confidence"]) / 100.0
+            predictions[m3_pred] = max(predictions.get(m3_pred, 0.0), m3_conf)
+        if not predictions:
+            predictions["Normal"] = 1.0
+
         payload = _build_pipeline_outputs(
             predictions,
             questionnaire_data,
-            heatmap_base64=MOCK_HEATMAPS[selected_profile["name"]],
+            heatmap_base64="",
             model1_override=model1_override,
             model1_pytorch_inference_ok=model1_pytorch_inference_ok,
             model1_gradcam_b64=model1_gradcam_b64,
@@ -1452,22 +1346,23 @@ async def debug_model_status() -> dict[str, Any]:
         "pytorch_version": pt_ver,
         "environment": ENVIRONMENT,
         "analyze_provenance_sources": {
-            "run_mode": "hybrid" if hybrid_preview else "mock",
+            "run_mode": "hybrid" if hybrid_preview else "rules",
             "model1_result": {"source": "model" if m1_ready else "rules"},
             "model2_result": {"source": "model" if m2_ready else "rules"},
             "model3_result": {"source": "model" if m3_ready else "rules"},
             "gate_decision": {"source": "rules"},
-            "findings": {"source": "mock"},
+            "findings": {"source": "rules"},
             "doctor_questions": {"source": "rules"},
             "report_summary": {"source": "rules"},
             "anatomy_guide": {"source": "static"},
         },
         "analyze_provenance_notes": {
             "findings": (
-                "predictions (14 CXR labels) and gradcam heatmap are mock; "
-                "ML Model 1 uses PyTorch ResNet50 + ImageNet norm + optional Grad-CAM; "
-                "ML Model 2 uses Keras H5 + /255 when loaded and inference succeeds; "
-                "model3 in /analyze is DenseNet-121 (same instance as /predict/densenet)."
+                "Aggregated predictions are built only from non-Normal outputs of "
+                "ML Model 1 (PyTorch), ML Model 2 (H5), and DenseNet-121 when each runs "
+                "successfully; otherwise the dict is {'Normal': 1.0}. Top-level gradcam "
+                "heatmap_base64 is reserved and may be empty; model1/model3 expose their "
+                "own Grad-CAM when neural paths succeed."
             ),
         },
     }
@@ -1521,6 +1416,35 @@ async def predict_densenet(
             f"DenseNet-121 inference failed: {exc}" if str(exc) else "DenseNet-121 inference failed.",
             500,
         )
+
+
+@app.post("/api/v1/generate-questions")
+async def generate_questions(
+    req: QuestionRequest,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> JSONResponse:
+    """Return suggested doctor questions for high-attention finding labels (educational)."""
+    auth_error = _validate_api_key(x_api_key)
+    if auth_error is not None:
+        return auth_error
+    suggested_questions: list[dict[str, str]] = []
+    q_index = 1
+    for finding in req.high_attention_findings:
+        dict_key = finding.replace(" ", "_")
+        if dict_key in CLINICAL_DICTIONARY:
+            for q_text in CLINICAL_DICTIONARY[dict_key]:
+                suggested_questions.append(
+                    {
+                        "id": f"q{q_index}",
+                        "text": q_text,
+                        "finding_trigger": finding,
+                    }
+                )
+                q_index += 1
+    return JSONResponse(
+        status_code=200,
+        content={"status": "success", "suggested_questions": suggested_questions},
+    )
 
 
 @app.post("/api/v1/analyze")

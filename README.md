@@ -185,7 +185,7 @@ Set these backend env vars:
 ```env
 ENABLE_MODEL2_H5=true
 H5_MODEL2_PATH=models/resnet152v2_lung_disease_final.h5
-H5_MODEL2_LABELS=Lung_Opacity,Normal,Viral_Pneumonia
+H5_MODEL2_LABELS=Normal,Lung_Opacity,Viral_Pneumonia
 ```
 
 (Legacy: `ENABLE_H5_MODEL`, `H5_MODEL_PATH`, `H5_STAGE2_LABELS` are still read if the new names are unset.)

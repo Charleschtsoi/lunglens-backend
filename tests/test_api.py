@@ -1,12 +1,11 @@
 """
 API contract tests for LungLens FastAPI backend.
 
-Works with real ML weights loaded or mock/rule fallback (no env assumptions).
+Works with real ML weights loaded or rules-only fallback (no env assumptions).
 """
 
 from __future__ import annotations
 
-import random
 from pathlib import Path
 
 import pytest
@@ -17,12 +16,10 @@ from main import app
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TEST_IMAGE_PATH = PROJECT_ROOT / "testfile" / "Lung Xray.jpeg"
 
-# API returns humanized Model 2 labels (underscores → spaces); mock path may use "Other".
-MODEL2_LABELS_API = frozenset(
-    {"Normal", "Lung Opacity", "Viral Pneumonia", "Other"}
-)
+# API returns humanized Model 2 labels (underscores → spaces).
+MODEL2_LABELS_API = frozenset({"Normal", "Lung Opacity", "Viral Pneumonia"})
 
-# Neural Model 1 uses 3-class checkpoint labels; mock scaffold uses Pneumonia | Normal.
+# Neural Model 1 uses 3-class checkpoint labels.
 MODEL1_LABELS_ALLOWED = frozenset(
     {"Normal", "Pneumonia-Bacteria", "Pneumonia-Virus", "Pneumonia"}
 )
@@ -195,6 +192,13 @@ class TestResponseShape:
             assert "probabilities" in m3 and "gradcam" in m3, (
                 f"successful model3 must include probabilities+gradcam, got keys {m3.keys()}"
             )
+            gc = m3.get("gradcam")
+            if isinstance(gc, str) and gc.strip():
+                ip = m3.get("input_preview_base64")
+                assert isinstance(ip, str) and len(ip) > 50, (
+                    "when model3.gradcam is present, input_preview_base64 must be a non-trivial PNG "
+                    f"for UI alignment, got {type(ip).__name__} len={len(ip) if isinstance(ip, str) else 'n/a'}"
+                )
         else:
             assert "error" in m3, f"failed model3 must include error, got {m3!r}"
 
@@ -255,8 +259,8 @@ class TestModel1:
     @pytest.mark.asyncio
     async def test_model1_provenance_source(self, analyze_json: dict) -> None:
         src = analyze_json["provenance"]["model1"]["source"]
-        assert src in ("model", "mock"), (
-            f"provenance.model1.source must be 'model' or 'mock', got {src!r}"
+        assert src in ("model", "rules"), (
+            f"provenance.model1.source must be 'model' or 'rules', got {src!r}"
         )
 
 
@@ -265,7 +269,7 @@ class TestModel2:
     async def test_model2_has_label(self, analyze_json: dict) -> None:
         label = analyze_json["model2"]["label"]
         assert label in MODEL2_LABELS_API, (
-            "model2.label must match API labels (spaces, optional Other from mock); "
+            "model2.label must match API labels (spaces); "
             f"got {label!r}; allowed={sorted(MODEL2_LABELS_API)}"
         )
 
@@ -282,27 +286,27 @@ class TestModel2:
     @pytest.mark.asyncio
     async def test_model2_provenance_source(self, analyze_json: dict) -> None:
         src = analyze_json["provenance"]["model2"]["source"]
-        assert src in ("model", "mock"), (
-            f"provenance.model2.source must be 'model' or 'mock', got {src!r}"
+        assert src in ("model", "rules"), (
+            f"provenance.model2.source must be 'model' or 'rules', got {src!r}"
         )
 
 
 class TestGateLogic:
     @pytest.mark.asyncio
     async def test_gate_continue_when_abnormal(self, analyze_json: dict) -> None:
-        m1 = analyze_json["model1"]["label"]
-        m2 = analyze_json["model2"]["label"]
-        abnormal = (m1 != "Normal") or (m2 != "Normal")
+        preds = analyze_json.get("predictions") or {}
+        pred_keys = set(preds.keys()) if isinstance(preds, dict) else set()
+        only_normal = pred_keys == {"Normal"}
         route = analyze_json["gate"]["route"]
-        if abnormal:
-            assert route == "continue", (
-                f"If either model is non-Normal, gate.route must be 'continue'; "
-                f"model1={m1!r} model2={m2!r} route={route!r}"
+        if only_normal:
+            assert route == "early_stop", (
+                f"When aggregated predictions are only Normal, gate.route must be "
+                f"'early_stop'; predictions={preds!r} route={route!r}"
             )
         else:
-            assert route == "early_stop", (
-                f"If both models are Normal, gate.route must be 'early_stop'; "
-                f"model1={m1!r} model2={m2!r} route={route!r}"
+            assert route == "continue", (
+                f"When any non-Normal finding is present in predictions, gate.route must "
+                f"be 'continue'; predictions={preds!r} route={route!r}"
             )
 
     @pytest.mark.asyncio
@@ -333,10 +337,7 @@ class TestPipelineEndpoint:
                 "image/jpeg",
             )
         }
-        # Identical PRNG stream per request so mock scaffolding matches byte-for-byte shape.
-        random.seed(0)
         r_v1 = await client.post("/api/v1/analyze", files=files)
-        random.seed(0)
         r_pipe = await client.post("/pipeline/analyze", files=files)
 
         assert r_v1.status_code == 200, (
