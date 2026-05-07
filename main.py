@@ -111,14 +111,10 @@ H5_MODEL2_PATH = (
     or os.getenv("H5_MODEL_PATH", "models/resnet152v2_lung_disease_final.h5")
 ).strip()
 # Class index i = argmax(probs)[i] must match training output order exactly.
-# Default uses alphabetical order from common Keras ImageDataGenerator training:
-# [0]=Lung_Opacity, [1]=Normal, [2]=Viral_Pneumonia.
-# If training used a different folder/class ordering, set H5_MODEL2_LABELS to match the checkpoint.
-# Override: H5_MODEL2_LABELS (legacy: H5_STAGE2_LABELS).
-H5_MODEL2_LABELS = _parse_csv(
-    os.getenv("H5_MODEL2_LABELS")
-    or os.getenv("H5_STAGE2_LABELS", "Lung_Opacity,Normal,Viral_Pneumonia")
-)
+# DO NOT CHANGE THIS ORDER.
+# Keras assigned indices alphabetically during training (L -> N -> V).
+# Index 0 = Lung Opacity, Index 1 = Normal, Index 2 = Viral Pneumonia.
+H5_MODEL2_LABELS = ["Lung Opacity", "Normal", "Viral Pneumonia"]
 # Prefer ENABLE_MODEL1; legacy ENABLE_MODEL1_PYTORCH honored if the new key is unset.
 if os.getenv("ENABLE_MODEL1") is not None:
     ENABLE_MODEL1 = _parse_bool_env("ENABLE_MODEL1", default=False)
@@ -896,11 +892,12 @@ def _load_copd_pipeline() -> None:
 
 def _preprocess_model2_h5_numpy(image_bytes: bytes) -> Any:
     """
-    Match training preprocessing for ML Model 2 (this checkpoint):
-    - RGB (not BGR)
+    ML Model 2 preprocessing:
+    - RGB input
     - Resize to 224 x 224
-    - float32, pixel values / 255.0 in [0, 1]
-    - Do NOT use tf.keras.applications.resnet_v2.preprocess_input
+    - float32 array
+    - Prefer tf.keras.applications.resnet_v2.preprocess_input
+      (fallback to /255.0 if unavailable)
     Returns: NumPy array shape (1, 224, 224, 3), dtype float32.
     """
     import numpy as np  # type: ignore
@@ -908,7 +905,17 @@ def _preprocess_model2_h5_numpy(image_bytes: bytes) -> Any:
     w, h = MODEL2_H5_IMAGE_SIZE
     image = Image.open(BytesIO(image_bytes)).convert("RGB")
     image = image.resize((w, h), Image.Resampling.BILINEAR)
-    batch = np.expand_dims(np.asarray(image, dtype=np.float32) / 255.0, axis=0)
+    img_array = np.asarray(image, dtype=np.float32)
+    try:
+        from tensorflow.keras.applications.resnet_v2 import preprocess_input  # type: ignore
+
+        img_array = preprocess_input(img_array)
+    except Exception:
+        logger.warning(
+            "ResNetV2 preprocess_input unavailable for Model 2; falling back to /255.0 scaling."
+        )
+        img_array = img_array / 255.0
+    batch = np.expand_dims(img_array, axis=0)
     return batch
 
 
@@ -916,20 +923,38 @@ def _model2_label_for_api(raw: str) -> str:
     return raw.replace("_", " ")
 
 
-def _run_h5_model2(image_bytes: bytes) -> tuple[str, float]:
-    if MODEL2_H5 is None:
-        raise RuntimeError(MODEL2_H5_LOAD_ERROR or "ML Model 2 H5 is not loaded.")
+def _model2_decode_scores(row: Any) -> tuple[int, str, float, dict[str, float]]:
     import numpy as np  # type: ignore
 
-    batch = _preprocess_model2_h5_numpy(image_bytes)
-    out = MODEL2_H5.predict(batch, verbose=0)
-    row = out[0]
     idx = int(np.argmax(row))
     raw_label = H5_MODEL2_LABELS[idx]
     logger.debug("Model 2 Raw Index: %s -> Mapped Label: %s", idx, raw_label)
     label = _model2_label_for_api(raw_label)
     confidence = float(np.asarray(row[idx], dtype=np.float64))
-    return label, confidence
+    probabilities = {
+        _model2_label_for_api(H5_MODEL2_LABELS[i]): round(
+            float(np.asarray(row[i], dtype=np.float64)), 4
+        )
+        for i in range(len(H5_MODEL2_LABELS))
+    }
+    return idx, label, confidence, probabilities
+
+
+def _run_h5_model2(image_bytes: bytes) -> tuple[str, float, dict[str, float]]:
+    if MODEL2_H5 is None:
+        raise RuntimeError(MODEL2_H5_LOAD_ERROR or "ML Model 2 H5 is not loaded.")
+    import numpy as np  # type: ignore
+
+    batch = _preprocess_model2_h5_numpy(image_bytes)
+    logger.debug(
+        "Model 2 preprocessed batch range: min=%.6f max=%.6f",
+        float(np.min(batch)),
+        float(np.max(batch)),
+    )
+    out = MODEL2_H5.predict(batch, verbose=0)
+    row = out[0]
+    _, label, confidence, probabilities = _model2_decode_scores(row)
+    return label, confidence, probabilities
 
 
 def _run_copd_screening(patient_data: dict[str, Any]) -> tuple[str, float]:
@@ -1097,6 +1122,7 @@ def _build_pipeline_outputs(
     model1_gradcam_b64: str | None = None,
     model1_probabilities: dict[str, float] | None = None,
     model2_override: tuple[str, float] | None = None,
+    model2_probabilities: dict[str, float] | None = None,
     model2_h5_inference_ok: bool = False,
     timing_model1_ms: float = 18.0,
     timing_model2_ms: float = 22.0,
@@ -1286,23 +1312,24 @@ def _build_pipeline_outputs(
             "confidence": round(top_confidence, 3),
         },
         "model1": {
-            "label": model1_label,
+            "prediction": model1_label,
             "confidence": model1_confidence,
+            "status": "success" if model1_pytorch_inference_ok else "failed",
+            "probabilities": model1_probabilities or {},
+            "label": model1_label,
             **(
                 {"model_name": "ResNet50-3Class"}
                 if model1_pytorch_inference_ok
                 else {}
             ),
             **({"gradcam": model1_gradcam_b64} if model1_gradcam_b64 else {}),
-            **(
-                {"probabilities": model1_probabilities}
-                if model1_probabilities
-                else {}
-            ),
         },
         "model2": {
-            "label": model2_label,
+            "prediction": model2_label,
             "confidence": model2_confidence,
+            "status": "success" if model2_h5_inference_ok else "failed",
+            "probabilities": model2_probabilities or {},
+            "label": model2_label,
         },
         "gate": {
             "route": gate_route,
@@ -1414,6 +1441,7 @@ async def _analyze_internal(
 
         model2_override: tuple[str, float] | None = None
         model2_h5_inference_ok = False
+        model2_probabilities: dict[str, float] | None = None
         h5_label = "Normal"
         h5_conf_r = 0.0
         t_model2_start = time.perf_counter()
@@ -1421,11 +1449,12 @@ async def _analyze_internal(
             _warn_model2_file_missing_once("analyze")
         if ENABLE_MODEL2_H5 and MODEL2_H5 is not None:
             try:
-                h5_label, h5_conf = await asyncio.to_thread(
+                h5_label, h5_conf, h5_probs = await asyncio.to_thread(
                     _run_h5_model2, image_bytes
                 )
                 h5_conf_r = round(float(h5_conf), 3)
                 model2_override = (h5_label, h5_conf_r)
+                model2_probabilities = h5_probs
                 model2_h5_inference_ok = True
             except Exception as exc:
                 logger.warning("ML Model 2 H5 inference failed: %s", exc)
@@ -1511,6 +1540,7 @@ async def _analyze_internal(
             model1_gradcam_b64=model1_gradcam_b64,
             model1_probabilities=model1_probabilities,
             model2_override=model2_override,
+            model2_probabilities=model2_probabilities,
             model2_h5_inference_ok=model2_h5_inference_ok,
             timing_model1_ms=timing_model1_ms,
             timing_model2_ms=timing_model2_ms,
@@ -1560,6 +1590,14 @@ async def healthz() -> dict[str, str]:
 
 @app.on_event("startup")
 async def _startup_load_models() -> None:
+    logger.info("Resolved H5_MODEL2_LABELS order: %s", H5_MODEL2_LABELS)
+    # Sanity check for label decoding against configured ordering.
+    sanity_idx, sanity_label, _, _ = _model2_decode_scores([0.9, 0.05, 0.05])
+    logger.info(
+        "Model 2 mapping sanity check [0.9,0.05,0.05] -> index=%s label=%s",
+        sanity_idx,
+        sanity_label,
+    )
     _load_model1_pytorch()
     _load_model2_h5()
     _load_copd_pipeline()
