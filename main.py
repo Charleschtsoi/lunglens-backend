@@ -111,13 +111,13 @@ H5_MODEL2_PATH = (
     or os.getenv("H5_MODEL_PATH", "models/resnet152v2_lung_disease_final.h5")
 ).strip()
 # Class index i = argmax(probs)[i] must match training output order exactly.
-# Default: [0]=Normal, [1]=Lung_Opacity, [2]=Viral_Pneumonia.
-# If training used a different order (e.g. alphabetical folders → Lung_Opacity,Normal,Viral_Pneumonia),
-# set H5_MODEL2_LABELS to match the checkpoint.
+# Default uses alphabetical order from common Keras ImageDataGenerator training:
+# [0]=Lung_Opacity, [1]=Normal, [2]=Viral_Pneumonia.
+# If training used a different folder/class ordering, set H5_MODEL2_LABELS to match the checkpoint.
 # Override: H5_MODEL2_LABELS (legacy: H5_STAGE2_LABELS).
 H5_MODEL2_LABELS = _parse_csv(
     os.getenv("H5_MODEL2_LABELS")
-    or os.getenv("H5_STAGE2_LABELS", "Normal,Lung_Opacity,Viral_Pneumonia")
+    or os.getenv("H5_STAGE2_LABELS", "Lung_Opacity,Normal,Viral_Pneumonia")
 )
 # Prefer ENABLE_MODEL1; legacy ENABLE_MODEL1_PYTORCH honored if the new key is unset.
 if os.getenv("ENABLE_MODEL1") is not None:
@@ -138,6 +138,10 @@ MODEL1_LABELS = _parse_csv(
 ENABLE_DENSENET121 = _parse_bool_env("ENABLE_DENSENET121", default=False)
 DENSENET121_PATH = os.getenv(
     "DENSENET121_PATH", "models/best_densenet121_lunglens.pth"
+).strip()
+ENABLE_MODEL4_SWINT = _parse_bool_env("ENABLE_MODEL4_SWINT", default=False)
+MODEL4_SWINT_PATH = os.getenv(
+    "MODEL4_SWINT_PATH", "models/best_swint_lunglens.pth"
 ).strip()
 # DenseNet-121 class mapping is hard-enforced to match checkpoint output indices.
 CLASS_NAMES = ["Normal", "Pneumonia-Bacteria", "Pneumonia-Virus"]
@@ -199,6 +203,8 @@ COPD_SCALER: Any = None
 MODEL_DENSENET121: Any = None
 MODEL_DENSENET121_LOAD_ERROR: str | None = None
 _DENSENET121_PREPROCESS: Any = None
+MODEL4_SWINT: Any = None
+MODEL4_SWINT_LOAD_ERROR: str | None = None
 TENSORFLOW_VERSION: str | None = None
 PYTORCH_VERSION: str | None = None
 _MODEL2_FILE_MISSING_WARNED = False
@@ -242,6 +248,10 @@ def _registry_health_aliases() -> dict[str, Any]:
         "model3_densenet121": {
             "enabled": ENABLE_DENSENET121,
             "loaded": MODEL_DENSENET121 is not None,
+        },
+        "model4_swint": {
+            "enabled": ENABLE_MODEL4_SWINT,
+            "loaded": MODEL4_SWINT is not None,
         },
     }
 
@@ -428,6 +438,105 @@ def _densenet121_path_diagnostics() -> dict[str, Any]:
     }
 
 
+def _model4_swint_path_diagnostics() -> dict[str, Any]:
+    abs_path = os.path.abspath(MODEL4_SWINT_PATH)
+    exists = os.path.isfile(abs_path)
+    size_bytes: int | None = None
+    if exists:
+        try:
+            size_bytes = os.path.getsize(abs_path)
+        except OSError as exc:
+            logger.warning("Could not stat Swin-T .pth file %s: %s", abs_path, exc)
+    return {
+        "path": MODEL4_SWINT_PATH,
+        "absolute_path": abs_path,
+        "exists": exists,
+        "size_bytes": size_bytes,
+    }
+
+
+def _load_swint_model4() -> None:
+    global MODEL4_SWINT, MODEL4_SWINT_LOAD_ERROR, PYTORCH_VERSION
+    if not ENABLE_MODEL4_SWINT:
+        MODEL4_SWINT = None
+        MODEL4_SWINT_LOAD_ERROR = None
+        logger.info("Model 4 (Swin-T) skipped: ENABLE_MODEL4_SWINT is false.")
+        return
+
+    if not os.path.exists(MODEL4_SWINT_PATH):
+        MODEL4_SWINT = None
+        MODEL4_SWINT_LOAD_ERROR = (
+            f"Swin-T model file not found at {MODEL4_SWINT_PATH}."
+        )
+        logger.warning("%s Model 4 disabled.", MODEL4_SWINT_LOAD_ERROR)
+        return
+
+    try:
+        import torch
+        import torch.nn as nn
+        import torchvision.models as models
+
+        if PYTORCH_VERSION is None:
+            PYTORCH_VERSION = str(torch.__version__)
+            logger.info("PyTorch version: %s", PYTORCH_VERSION)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        model = models.swin_t(weights=None)
+        num_features = model.head.in_features
+        model.head = nn.Sequential(
+            nn.Dropout(0.5),
+            nn.Linear(num_features, 2),
+        )
+        # Load weights safely regardless of train-time device.
+        try:
+            state_dict = torch.load(
+                MODEL4_SWINT_PATH,
+                map_location=torch.device("cpu"),
+                weights_only=True,
+            )
+        except TypeError:
+            state_dict = torch.load(
+                MODEL4_SWINT_PATH,
+                map_location=torch.device("cpu"),
+            )
+        model.load_state_dict(state_dict)
+        model.to(device)
+        model.eval()
+        MODEL4_SWINT = model
+        MODEL4_SWINT_LOAD_ERROR = None
+        logger.info("Model 4 (Swin-T) loaded successfully on device=%s.", device)
+    except Exception as exc:
+        MODEL4_SWINT = None
+        MODEL4_SWINT_LOAD_ERROR = str(exc)
+        logger.exception("FATAL: Failed to load Swin-T model: %s", exc)
+
+
+def _run_swint_model4(image_bytes: bytes) -> tuple[str, float]:
+    if MODEL4_SWINT is None:
+        raise RuntimeError(MODEL4_SWINT_LOAD_ERROR or "Model 4 (Swin-T) is not loaded.")
+    import torch
+    from torchvision import transforms
+
+    device = next(MODEL4_SWINT.parameters()).device
+    image = Image.open(BytesIO(image_bytes)).convert("RGB")
+    transform = transforms.Compose(
+        [
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ]
+    )
+    input_tensor = transform(image).unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        outputs = MODEL4_SWINT(input_tensor)
+        probs = torch.softmax(outputs, dim=1)[0]
+        conf, pred_idx = torch.max(probs, 0)
+
+    label = "Pneumonia" if pred_idx.item() == 1 else "Normal"
+    return label, round(float(conf.item()), 3)
+
+
 def _densenet121_preprocess() -> Any:
     """Strict 224×224 resize + ImageNet normalization."""
     global _DENSENET121_PREPROCESS
@@ -585,6 +694,12 @@ def _missing_enabled_model_files() -> list[str]:
         if not d3["exists"]:
             missing.append(
                 f"model3 missing: DENSENET121_PATH={d3['path']!r} absolute_path={d3['absolute_path']!r}"
+            )
+    if ENABLE_MODEL4_SWINT:
+        d4 = _model4_swint_path_diagnostics()
+        if not d4["exists"]:
+            missing.append(
+                f"model4 missing: MODEL4_SWINT_PATH={d4['path']!r} absolute_path={d4['absolute_path']!r}"
             )
     return missing
 
@@ -811,6 +926,7 @@ def _run_h5_model2(image_bytes: bytes) -> tuple[str, float]:
     row = out[0]
     idx = int(np.argmax(row))
     raw_label = H5_MODEL2_LABELS[idx]
+    logger.debug("Model 2 Raw Index: %s -> Mapped Label: %s", idx, raw_label)
     label = _model2_label_for_api(raw_label)
     confidence = float(np.asarray(row[idx], dtype=np.float64))
     return label, confidence
@@ -1315,6 +1431,29 @@ async def _analyze_internal(
                 logger.warning("ML Model 2 H5 inference failed: %s", exc)
         timing_model2_ms = (time.perf_counter() - t_model2_start) * 1000.0
 
+        model4_swint_result: dict[str, Any] = {
+            "prediction": "N/A",
+            "confidence": 0.0,
+            "status": "failed",
+        }
+        model4_swint_label = "Normal"
+        model4_swint_conf = 0.0
+        model4_swint_inference_ok = False
+        if ENABLE_MODEL4_SWINT and MODEL4_SWINT is not None:
+            try:
+                model4_swint_label, model4_swint_conf = await asyncio.to_thread(
+                    _run_swint_model4, image_bytes
+                )
+                model4_swint_conf = round(float(model4_swint_conf), 3)
+                model4_swint_result = {
+                    "prediction": model4_swint_label,
+                    "confidence": model4_swint_conf,
+                    "status": "success",
+                }
+                model4_swint_inference_ok = True
+            except Exception as exc:
+                logger.error("Model 4 (Swin-T) inference failed: %s", exc)
+
         densenet_payload: dict[str, Any] = _densenet_analyze_error_payload()
         timing_densenet_ms = 0.0
         if ENABLE_DENSENET121 and MODEL_DENSENET121 is not None:
@@ -1343,6 +1482,15 @@ async def _analyze_internal(
             predictions[base] = max(predictions.get(base, 0.0), m1_conf_r)
         if model2_h5_inference_ok and h5_label != "Normal":
             predictions[h5_label] = max(predictions.get(h5_label, 0.0), h5_conf_r)
+        if model4_swint_inference_ok and model4_swint_label != "Normal":
+            m4_base = (
+                "Pneumonia"
+                if "Pneumonia" in model4_swint_label
+                else model4_swint_label
+            )
+            predictions[m4_base] = max(
+                predictions.get(m4_base, 0.0), model4_swint_conf
+            )
         m3_class_name = str(densenet_payload.get("class_name", densenet_payload.get("prediction", "")))
         if densenet_neural_ok and m3_class_name and m3_class_name != "Normal":
             m3_pred = m3_class_name
@@ -1391,6 +1539,7 @@ async def _analyze_internal(
 
         if copd_result:
             payload["copd_screening"] = copd_result
+        payload["model4_swint"] = model4_swint_result
         return JSONResponse(status_code=200, content=payload)
     except ValueError as exc:
         return _error_response(str(exc), 400)
@@ -1415,6 +1564,7 @@ async def _startup_load_models() -> None:
     _load_model2_h5()
     _load_copd_pipeline()
     _load_densenet121()
+    _load_swint_model4()
     missing = _missing_enabled_model_files()
     if missing:
         for msg in missing:
