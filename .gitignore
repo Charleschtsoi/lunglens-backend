@@ -1,16 +1,13 @@
 __pycache__/
 *.pyc
 .DS_Store
-
-# Model weights — store in shared Drive, not git
+.env
+.venv/
+venv/
+models/
+.pytest_cache/
+testfile/
 *.pth
 *.h5
 *.pkl
-
-# Local env and test files
-.env
 test_xray.jpg
-
-# Virtual environment
-.venv/
-venv/
