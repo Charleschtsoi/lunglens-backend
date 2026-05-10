@@ -12,6 +12,7 @@ from typing import Any, List
 
 import joblib
 import numpy as np
+import google.generativeai as genai
 from fastapi import FastAPI, File, Form, Header, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -999,6 +1000,46 @@ def _run_copd_screening(patient_data: dict[str, Any]) -> tuple[str, float]:
     return label, round(prediction_prob, 3)
 
 
+def _generate_llm_summary(
+    ml_results: dict[str, Any], patient_data: dict[str, Any], api_key: str | None
+) -> dict[str, str]:
+    if not api_key:
+        return {"status": "skipped", "text": "No Gemini API key provided."}
+
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-2.5-flash")
+
+        smoking_status = patient_data.get("smoking_status", patient_data.get("smoking", "Unknown"))
+        prompt = f"""
+You are a highly empathetic, professional medical AI educator.
+Your goal is to explain Chest X-ray AI findings to a patient based on their symptoms.
+CRITICAL RULE: You must NEVER definitively diagnose. Always use language like "The AI detected patterns consistent with..." and advise consulting a doctor.
+
+Patient Profile:
+- Age: {patient_data.get("age", "Unknown")}
+- Fever: {"Yes" if patient_data.get("fever") else "No"}
+- Cough Duration: {patient_data.get("cough_duration_days", 0)} days
+- Smoking Status: {smoking_status}
+
+AI Findings:
+{ml_results}
+
+Respond in exactly two sections using Markdown:
+### 🩺 Clinical Observation
+(2-3 sentences combining their symptoms with the AI findings for a layman.)
+
+### 📋 Suggested Next Steps
+(3 actionable, bulleted next steps based on severity.)
+"""
+        response = model.generate_content(prompt)
+        text = getattr(response, "text", None) or "Could not generate clinical summary."
+        return {"status": "success", "text": text}
+    except Exception as exc:
+        logger.error("LLM Generation failed: %s", exc)
+        return {"status": "failed", "text": "Could not generate clinical summary."}
+
+
 def _error_response(message: str, status_code: int) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
@@ -1382,7 +1423,10 @@ def _build_pipeline_outputs(
 
 
 async def _analyze_internal(
-    image: UploadFile, questionnaire: str | None, x_api_key: str | None
+    image: UploadFile,
+    questionnaire: str | None,
+    x_api_key: str | None,
+    gemini_api_key: str | None,
 ) -> JSONResponse:
     try:
         auth_error = _validate_api_key(x_api_key)
@@ -1570,6 +1614,21 @@ async def _analyze_internal(
         if copd_result:
             payload["copd_screening"] = copd_result
         payload["model4_swint"] = model4_swint_result
+        ml_summary = {
+            "Primary Finding": max(predictions, key=predictions.get)
+            if predictions
+            else "Normal",
+            "Model 1 (ResNet)": payload.get("model1", {}).get("prediction"),
+            "Model 2 (ResNetV2)": payload.get("model2", {}).get("prediction"),
+            "COPD Risk": payload.get("copd_screening", {}).get("prediction"),
+        }
+        llm_result = await asyncio.to_thread(
+            _generate_llm_summary,
+            ml_summary,
+            patient_data or {},
+            gemini_api_key,
+        )
+        payload["llm_evaluation"] = llm_result
         return JSONResponse(status_code=200, content=payload)
     except ValueError as exc:
         return _error_response(str(exc), 400)
@@ -1803,10 +1862,14 @@ async def generate_questions(
 async def analyze_v1(
     image: UploadFile = File(...),
     questionnaire: str | None = Form(None),
+    gemini_api_key: str | None = Form(None),
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> JSONResponse:
     return await _analyze_internal(
-        image=image, questionnaire=questionnaire, x_api_key=x_api_key
+        image=image,
+        questionnaire=questionnaire,
+        x_api_key=x_api_key,
+        gemini_api_key=gemini_api_key,
     )
 
 
@@ -1814,8 +1877,12 @@ async def analyze_v1(
 async def analyze_pipeline_alias(
     image: UploadFile = File(...),
     questionnaire: str | None = Form(None),
+    gemini_api_key: str | None = Form(None),
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> JSONResponse:
     return await _analyze_internal(
-        image=image, questionnaire=questionnaire, x_api_key=x_api_key
+        image=image,
+        questionnaire=questionnaire,
+        x_api_key=x_api_key,
+        gemini_api_key=gemini_api_key,
     )

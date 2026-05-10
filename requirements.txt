@@ -13,3 +13,4 @@ torch
 torchvision
 # DenseNet-121 /predict/densenet: Grad-CAM (PyPI name is grad-cam; import pytorch_grad_cam)
 grad-cam>=1.4.8
+google-generativeai
