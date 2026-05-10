@@ -111,11 +111,9 @@ H5_MODEL2_PATH = (
     os.getenv("H5_MODEL2_PATH")
     or os.getenv("H5_MODEL_PATH", "models/resnet152v2_lung_disease_final.h5")
 ).strip()
-# Class index i = argmax(probs)[i] must match training output order exactly.
-# DO NOT CHANGE THIS ORDER.
-# Keras assigned indices alphabetically during training (L -> N -> V).
-# Index 0 = Lung Opacity, Index 1 = Normal, Index 2 = Viral Pneumonia.
-H5_MODEL2_LABELS = ["Lung Opacity", "Normal", "Viral Pneumonia"]
+# Class indices mapped manually during training
+# Index 0 = Normal, Index 1 = Lung Opacity, Index 2 = Viral Pneumonia
+H5_MODEL2_LABELS = ["Normal", "Lung Opacity", "Viral Pneumonia"]
 # Prefer ENABLE_MODEL1; legacy ENABLE_MODEL1_PYTORCH honored if the new key is unset.
 if os.getenv("ENABLE_MODEL1") is not None:
     ENABLE_MODEL1 = _parse_bool_env("ENABLE_MODEL1", default=False)
@@ -1422,6 +1420,85 @@ def _build_pipeline_outputs(
     }
 
 
+def _build_demo_normal_payload(
+    questionnaire_data: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """May presentation bypass: healthy-normal ML snapshot without running inference."""
+    predictions: dict[str, float] = {"Normal": 0.99}
+    # Keys must match MODEL1_LABELS / frontend schema (not ad-hoc display strings).
+    demo_m1_probs = {
+        "Normal": 0.99,
+        "Pneumonia-Bacteria": 0.0,
+        "Pneumonia-Virus": 0.01,
+    }
+    demo_m2_probs = {
+        "Normal": 0.98,
+        "Lung Opacity": 0.01,
+        "Viral Pneumonia": 0.01,
+    }
+    demo_densenet: dict[str, Any] = {
+        "class_id": 0,
+        "class_name": "Normal",
+        "confidence_score": 0.97,
+        "prediction": "Normal",
+        "confidence": 97.0,
+        "probabilities": {
+            "Normal": 0.97,
+            "Pneumonia-Bacteria": 0.015,
+            "Pneumonia-Virus": 0.015,
+        },
+        "gradcam": "",
+        "input_preview_base64": "",
+        "model_name": "DenseNet-121",
+    }
+    payload = _build_pipeline_outputs(
+        predictions,
+        questionnaire_data,
+        heatmap_base64="",
+        model1_override=("Normal", 0.99),
+        model1_pytorch_inference_ok=True,
+        model1_gradcam_b64=None,
+        model1_probabilities=demo_m1_probs,
+        model2_override=("Normal", 0.98),
+        model2_probabilities=demo_m2_probs,
+        model2_h5_inference_ok=True,
+        timing_model1_ms=10.0,
+        timing_model2_ms=12.0,
+        densenet_payload=demo_densenet,
+        timing_densenet_ms=14.0,
+    )
+    payload["model1"] = {
+        "prediction": "Normal",
+        "confidence": 0.99,
+        "status": "success",
+        "probabilities": demo_m1_probs,
+        "label": "Normal",
+        "model_name": "ResNet50-3Class",
+    }
+    payload["model2"] = {
+        "prediction": "Normal",
+        "confidence": 0.98,
+        "status": "success",
+        "probabilities": demo_m2_probs,
+        "label": "Normal",
+    }
+    # Keep full DenseNet-shaped model3 from _build_pipeline_outputs (demo_densenet).
+    # Do not replace with a minimal dict — clients validate class_id, probabilities, etc.
+    payload["model4_swint"] = {
+        "prediction": "Normal",
+        "confidence": 0.96,
+        "status": "success",
+    }
+    # TODO: Add Model 5 mock here
+    # TODO: Add Model 6 mock here
+    payload["copd_screening"] = {
+        "prediction": "Low COPD Risk",
+        "confidence": 0.91,
+        "status": "success",
+    }
+    return payload
+
+
 async def _analyze_internal(
     image: UploadFile,
     questionnaire: str | None,
@@ -1435,6 +1512,9 @@ async def _analyze_internal(
 
         if not image.filename:
             return _error_response("Missing uploaded image filename.", 400)
+
+        _fname = (image.filename or "").strip()
+        is_demo = _fname in {"demo_normal.jpeg", "demo_normal.jpg"}
 
         content_type = (image.content_type or "").lower()
         if content_type not in ALLOWED_IMAGE_MIME_TYPES:
@@ -1462,161 +1542,169 @@ async def _analyze_internal(
             if isinstance(maybe_patient_data, dict):
                 patient_data = maybe_patient_data
 
-        model1_override: tuple[str, float] | None = None
-        model1_pytorch_inference_ok = False
-        model1_gradcam_b64: str | None = None
-        model1_probabilities: dict[str, float] | None = None
-        m1_label = "Normal"
-        m1_conf_r = 0.0
-        t_model1_start = time.perf_counter()
-        if ENABLE_MODEL1 and MODEL1_PT is not None:
-            try:
-                m1_label, m1_conf, m1_probs, m1_gc = await asyncio.to_thread(
-                    _run_pytorch_model1_full, image_bytes
-                )
-                m1_conf_r = round(float(m1_conf), 3)
-                model1_override = (m1_label, m1_conf_r)
-                model1_gradcam_b64 = m1_gc
-                model1_probabilities = m1_probs
-                model1_pytorch_inference_ok = True
-            except Exception as exc:
-                logger.warning("ML Model 1 PyTorch inference failed: %s", exc)
-        timing_model1_ms = (time.perf_counter() - t_model1_start) * 1000.0
-
-        model2_override: tuple[str, float] | None = None
-        model2_h5_inference_ok = False
-        model2_probabilities: dict[str, float] | None = None
-        h5_label = "Normal"
-        h5_conf_r = 0.0
-        t_model2_start = time.perf_counter()
-        if ENABLE_MODEL2_H5:
-            _warn_model2_file_missing_once("analyze")
-        if ENABLE_MODEL2_H5 and MODEL2_H5 is not None:
-            try:
-                h5_label, h5_conf, h5_probs = await asyncio.to_thread(
-                    _run_h5_model2, image_bytes
-                )
-                h5_conf_r = round(float(h5_conf), 3)
-                model2_override = (h5_label, h5_conf_r)
-                model2_probabilities = h5_probs
-                model2_h5_inference_ok = True
-            except Exception as exc:
-                logger.warning("ML Model 2 H5 inference failed: %s", exc)
-        timing_model2_ms = (time.perf_counter() - t_model2_start) * 1000.0
-
-        model4_swint_result: dict[str, Any] = {
-            "prediction": "N/A",
-            "confidence": 0.0,
-            "status": "failed",
-        }
-        model4_swint_label = "Normal"
-        model4_swint_conf = 0.0
-        model4_swint_inference_ok = False
-        if ENABLE_MODEL4_SWINT and MODEL4_SWINT is not None:
-            try:
-                model4_swint_label, model4_swint_conf = await asyncio.to_thread(
-                    _run_swint_model4, image_bytes
-                )
-                model4_swint_conf = round(float(model4_swint_conf), 3)
-                model4_swint_result = {
-                    "prediction": model4_swint_label,
-                    "confidence": model4_swint_conf,
-                    "status": "success",
-                }
-                model4_swint_inference_ok = True
-            except Exception as exc:
-                logger.error("Model 4 (Swin-T) inference failed: %s", exc)
-
-        densenet_payload: dict[str, Any] = _densenet_analyze_error_payload()
-        timing_densenet_ms = 0.0
-        if ENABLE_DENSENET121 and MODEL_DENSENET121 is not None:
-            t_dn0 = time.perf_counter()
-            try:
-                dn = await asyncio.to_thread(
-                    _densenet121_predict_and_cam, image_bytes
-                )
-                densenet_payload = {**dn, "model_name": "DenseNet-121"}
-            except Exception as exc:
-                logger.warning(
-                    "DenseNet-121 in analyze pipeline failed (model1/model2 unaffected): %s",
-                    exc,
-                )
-                densenet_payload = _densenet_analyze_error_payload(
-                    (str(exc) or "Model not available")[:500]
-                )
-            timing_densenet_ms = (time.perf_counter() - t_dn0) * 1000.0
-
-        densenet_neural_ok = (
-            "prediction" in densenet_payload and "error" not in densenet_payload
-        )
-        predictions: dict[str, float] = {}
-        if model1_pytorch_inference_ok and m1_label != "Normal":
-            base = "Pneumonia" if "Pneumonia" in m1_label else m1_label
-            predictions[base] = max(predictions.get(base, 0.0), m1_conf_r)
-        if model2_h5_inference_ok and h5_label != "Normal":
-            predictions[h5_label] = max(predictions.get(h5_label, 0.0), h5_conf_r)
-        if model4_swint_inference_ok and model4_swint_label != "Normal":
-            m4_base = (
-                "Pneumonia"
-                if "Pneumonia" in model4_swint_label
-                else model4_swint_label
+        if is_demo:
+            logger.info(
+                "Demo mode triggered: Mocking ML results, but keeping LLM live."
             )
-            predictions[m4_base] = max(
-                predictions.get(m4_base, 0.0), model4_swint_conf
+            payload = _build_demo_normal_payload(questionnaire_data)
+        else:
+            model1_override: tuple[str, float] | None = None
+            model1_pytorch_inference_ok = False
+            model1_gradcam_b64: str | None = None
+            model1_probabilities: dict[str, float] | None = None
+            m1_label = "Normal"
+            m1_conf_r = 0.0
+            t_model1_start = time.perf_counter()
+            if ENABLE_MODEL1 and MODEL1_PT is not None:
+                try:
+                    m1_label, m1_conf, m1_probs, m1_gc = await asyncio.to_thread(
+                        _run_pytorch_model1_full, image_bytes
+                    )
+                    m1_conf_r = round(float(m1_conf), 3)
+                    model1_override = (m1_label, m1_conf_r)
+                    model1_gradcam_b64 = m1_gc
+                    model1_probabilities = m1_probs
+                    model1_pytorch_inference_ok = True
+                except Exception as exc:
+                    logger.warning("ML Model 1 PyTorch inference failed: %s", exc)
+            timing_model1_ms = (time.perf_counter() - t_model1_start) * 1000.0
+
+            model2_override: tuple[str, float] | None = None
+            model2_h5_inference_ok = False
+            model2_probabilities: dict[str, float] | None = None
+            h5_label = "Normal"
+            h5_conf_r = 0.0
+            t_model2_start = time.perf_counter()
+            if ENABLE_MODEL2_H5:
+                _warn_model2_file_missing_once("analyze")
+            if ENABLE_MODEL2_H5 and MODEL2_H5 is not None:
+                try:
+                    h5_label, h5_conf, h5_probs = await asyncio.to_thread(
+                        _run_h5_model2, image_bytes
+                    )
+                    h5_conf_r = round(float(h5_conf), 3)
+                    model2_override = (h5_label, h5_conf_r)
+                    model2_probabilities = h5_probs
+                    model2_h5_inference_ok = True
+                except Exception as exc:
+                    logger.warning("ML Model 2 H5 inference failed: %s", exc)
+            timing_model2_ms = (time.perf_counter() - t_model2_start) * 1000.0
+
+            model4_swint_result: dict[str, Any] = {
+                "prediction": "N/A",
+                "confidence": 0.0,
+                "status": "failed",
+            }
+            model4_swint_label = "Normal"
+            model4_swint_conf = 0.0
+            model4_swint_inference_ok = False
+            if ENABLE_MODEL4_SWINT and MODEL4_SWINT is not None:
+                try:
+                    model4_swint_label, model4_swint_conf = await asyncio.to_thread(
+                        _run_swint_model4, image_bytes
+                    )
+                    model4_swint_conf = round(float(model4_swint_conf), 3)
+                    model4_swint_result = {
+                        "prediction": model4_swint_label,
+                        "confidence": model4_swint_conf,
+                        "status": "success",
+                    }
+                    model4_swint_inference_ok = True
+                except Exception as exc:
+                    logger.error("Model 4 (Swin-T) inference failed: %s", exc)
+
+            densenet_payload: dict[str, Any] = _densenet_analyze_error_payload()
+            timing_densenet_ms = 0.0
+            if ENABLE_DENSENET121 and MODEL_DENSENET121 is not None:
+                t_dn0 = time.perf_counter()
+                try:
+                    dn = await asyncio.to_thread(
+                        _densenet121_predict_and_cam, image_bytes
+                    )
+                    densenet_payload = {**dn, "model_name": "DenseNet-121"}
+                except Exception as exc:
+                    logger.warning(
+                        "DenseNet-121 in analyze pipeline failed (model1/model2 unaffected): %s",
+                        exc,
+                    )
+                    densenet_payload = _densenet_analyze_error_payload(
+                        (str(exc) or "Model not available")[:500]
+                    )
+                timing_densenet_ms = (time.perf_counter() - t_dn0) * 1000.0
+
+            densenet_neural_ok = (
+                "prediction" in densenet_payload and "error" not in densenet_payload
             )
-        m3_class_name = str(densenet_payload.get("class_name", densenet_payload.get("prediction", "")))
-        if densenet_neural_ok and m3_class_name and m3_class_name != "Normal":
-            m3_pred = m3_class_name
-            if "confidence_score" in densenet_payload:
-                m3_conf = float(densenet_payload["confidence_score"])
-            else:
-                m3_conf = float(densenet_payload["confidence"]) / 100.0
-            predictions[m3_pred] = max(predictions.get(m3_pred, 0.0), m3_conf)
-        if not predictions:
-            predictions["Normal"] = 1.0
-
-        payload = _build_pipeline_outputs(
-            predictions,
-            questionnaire_data,
-            heatmap_base64="",
-            model1_override=model1_override,
-            model1_pytorch_inference_ok=model1_pytorch_inference_ok,
-            model1_gradcam_b64=model1_gradcam_b64,
-            model1_probabilities=model1_probabilities,
-            model2_override=model2_override,
-            model2_probabilities=model2_probabilities,
-            model2_h5_inference_ok=model2_h5_inference_ok,
-            timing_model1_ms=timing_model1_ms,
-            timing_model2_ms=timing_model2_ms,
-            densenet_payload=densenet_payload,
-            timing_densenet_ms=timing_densenet_ms,
-        )
-        copd_result = None
-        if (
-            isinstance(patient_data, dict)
-            and ENABLE_COPD_MODEL
-            and COPD_MODEL is not None
-            and COPD_SCALER is not None
-        ):
-            try:
-                copd_label, copd_conf = await asyncio.to_thread(
-                    _run_copd_screening, patient_data
+            predictions: dict[str, float] = {}
+            if model1_pytorch_inference_ok and m1_label != "Normal":
+                base = "Pneumonia" if "Pneumonia" in m1_label else m1_label
+                predictions[base] = max(predictions.get(base, 0.0), m1_conf_r)
+            if model2_h5_inference_ok and h5_label != "Normal":
+                predictions[h5_label] = max(predictions.get(h5_label, 0.0), h5_conf_r)
+            if model4_swint_inference_ok and model4_swint_label != "Normal":
+                m4_base = (
+                    "Pneumonia"
+                    if "Pneumonia" in model4_swint_label
+                    else model4_swint_label
                 )
-                copd_result = {
-                    "prediction": copd_label,
-                    "confidence": copd_conf,
-                    "status": "success",
-                }
-            except Exception as exc:
-                logger.error("COPD Inference failed: %s", exc)
-                copd_result = {"status": "failed"}
+                predictions[m4_base] = max(
+                    predictions.get(m4_base, 0.0), model4_swint_conf
+                )
+            m3_class_name = str(densenet_payload.get("class_name", densenet_payload.get("prediction", "")))
+            if densenet_neural_ok and m3_class_name and m3_class_name != "Normal":
+                m3_pred = m3_class_name
+                if "confidence_score" in densenet_payload:
+                    m3_conf = float(densenet_payload["confidence_score"])
+                else:
+                    m3_conf = float(densenet_payload["confidence"]) / 100.0
+                predictions[m3_pred] = max(predictions.get(m3_pred, 0.0), m3_conf)
+            if not predictions:
+                predictions["Normal"] = 1.0
 
-        if copd_result:
-            payload["copd_screening"] = copd_result
-        payload["model4_swint"] = model4_swint_result
+            payload = _build_pipeline_outputs(
+                predictions,
+                questionnaire_data,
+                heatmap_base64="",
+                model1_override=model1_override,
+                model1_pytorch_inference_ok=model1_pytorch_inference_ok,
+                model1_gradcam_b64=model1_gradcam_b64,
+                model1_probabilities=model1_probabilities,
+                model2_override=model2_override,
+                model2_probabilities=model2_probabilities,
+                model2_h5_inference_ok=model2_h5_inference_ok,
+                timing_model1_ms=timing_model1_ms,
+                timing_model2_ms=timing_model2_ms,
+                densenet_payload=densenet_payload,
+                timing_densenet_ms=timing_densenet_ms,
+            )
+            copd_result = None
+            if (
+                isinstance(patient_data, dict)
+                and ENABLE_COPD_MODEL
+                and COPD_MODEL is not None
+                and COPD_SCALER is not None
+            ):
+                try:
+                    copd_label, copd_conf = await asyncio.to_thread(
+                        _run_copd_screening, patient_data
+                    )
+                    copd_result = {
+                        "prediction": copd_label,
+                        "confidence": copd_conf,
+                        "status": "success",
+                    }
+                except Exception as exc:
+                    logger.error("COPD Inference failed: %s", exc)
+                    copd_result = {"status": "failed"}
+
+            if copd_result:
+                payload["copd_screening"] = copd_result
+            payload["model4_swint"] = model4_swint_result
+
+        predictions_for_llm: dict[str, float] = payload.get("predictions") or {}
         ml_summary = {
-            "Primary Finding": max(predictions, key=predictions.get)
-            if predictions
+            "Primary Finding": max(predictions_for_llm, key=predictions_for_llm.get)
+            if predictions_for_llm
             else "Normal",
             "Model 1 (ResNet)": payload.get("model1", {}).get("prediction"),
             "Model 2 (ResNetV2)": payload.get("model2", {}).get("prediction"),
