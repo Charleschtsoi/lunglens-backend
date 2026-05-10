@@ -5,7 +5,7 @@ colorFrom: red
 colorTo: gray
 sdk: docker
 pinned: false
-license: mit
+license: agpl-3.0
 ---
 
 # LungLens Backend
@@ -13,6 +13,22 @@ license: mit
 FastAPI backend for LungLens image analysis, rule-based gating, questionnaire-assisted risk context, and report synthesis.
 
 This README is written as a local onboarding guide for teammates: clone -> run -> test -> debug.
+
+## ⚖️ License & Commercial Use (Open Core)
+
+This repository is the **LungLens backend engine** (ML inference, tabular models, and AI pipeline orchestration). It is licensed under the **[GNU Affero General Public License v3.0 (AGPLv3)](LICENSE)**.
+
+**Dual licensing model**
+
+- **Academic, personal, and open-source use:** free under the AGPLv3, provided you comply with its terms (including copyleft and, where applicable, network use obligations).
+- **Commercial closed-source or proprietary SaaS / enterprise production:** if you need to run LungLens **without** AGPL obligations (for example, closed-source apps, commercial SaaS, or clinical production environments where you cannot release your entire qualifying stack under AGPL-compatible terms), you must obtain a **Commercial License**.
+
+**Why AGPL matters for network services**
+
+The AGPLv3 applies to this backend. For many hosted or SaaS-style deployments, offering the software as a service over a network can trigger obligations to provide corresponding source to users—unless you comply via open source **or** you license commercially.
+
+For scope, pricing, and enterprise terms, see **[COMMERCIAL_LICENSE.md](COMMERCIAL_LICENSE.md)**.  
+Commercial inquiries: **enterprise@lunglens.com**.
 
 ## What this backend does
 
