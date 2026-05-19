@@ -70,7 +70,9 @@ Commercial inquiries: **enterprise@lunglens.com**.
 - `GET /healthz` -> lightweight health
 - `GET /health` -> detailed model health/load status
 - `GET /debug` -> provenance/debug diagnostics
-- `POST /api/v1/analyze` -> primary analyze endpoint
+- `POST /api/v1/gemini/health-check` -> optional BYOK Gemini key probe (multipart `gemini_api_key`; blank = skip)
+- `POST /api/v1/analyze` -> primary analyze endpoint (includes `model4_swint` when Swin-T weights are present)
+- Reference contract: [`sample_response.json`](sample_response.json) (successful demo-normal baseline)
 - `POST /pipeline/analyze` -> alias of analyze endpoint
 - `POST /predict/densenet` -> standalone DenseNet inference + Grad-CAM
 - `POST /api/v1/generate-questions` -> question generation helper

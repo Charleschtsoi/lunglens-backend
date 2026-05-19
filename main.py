@@ -96,6 +96,115 @@ REQUIRE_API_KEY = _parse_bool_env(
     "REQUIRE_API_KEY", default=(ENVIRONMENT == "production")
 )
 API_KEY = os.getenv("API_KEY", "").strip()
+# Gemini educator preferred model (optional). When unset, discovery picks from the API key.
+GEMINI_MODEL = (os.getenv("GEMINI_MODEL") or "").strip()
+
+# Used only when list_models() is unavailable (no key yet / list failed).
+_GEMINI_STATIC_MODEL_CANDIDATES: tuple[str, ...] = (
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-001",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-latest",
+    "gemini-1.5-flash-002",
+    "gemini-pro",
+)
+
+
+def _gemini_model_preference_key(name: str) -> tuple[int, int]:
+    """Sort key: prefer flash / newer Gemini ids for educator summaries."""
+    n = name.lower()
+    score = 0
+    if "flash" in n:
+        score -= 20
+    if "2.5" in n:
+        score -= 8
+    elif "2.0" in n:
+        score -= 6
+    elif "1.5" in n:
+        score -= 4
+    if "pro" in n and "flash" not in n:
+        score += 6
+    if "preview" in n or "experimental" in n:
+        score += 3
+    if "lite" in n or "8b" in n:
+        score += 2
+    return (score, len(name))
+
+
+def _discover_gemini_generate_model_names(api_key: str) -> list[str]:
+    """Model short names this API key can use with generateContent (from list_models)."""
+    try:
+        genai.configure(api_key=api_key)
+        names: list[str] = []
+        for m in genai.list_models():
+            methods = getattr(m, "supported_generation_methods", None) or []
+            if "generateContent" not in methods:
+                continue
+            raw = (getattr(m, "name", None) or "").strip()
+            if raw.startswith("models/"):
+                raw = raw.split("/", 1)[1]
+            if raw and raw not in names:
+                names.append(raw)
+        return names
+    except Exception as exc:
+        logger.warning("Could not list Gemini models for key: %s", exc)
+        return []
+
+
+def _gemini_educator_models_to_try(api_key: str | None = None) -> list[str]:
+    """Models to try: env preference first, then key-specific discovery or static fallbacks."""
+    primary = GEMINI_MODEL or "gemini-2.0-flash"
+    discovered = _discover_gemini_generate_model_names(api_key) if api_key else []
+
+    seen: set[str] = set()
+    out: list[str] = []
+
+    def add(name: str) -> None:
+        n = name.strip()
+        if n and n not in seen:
+            seen.add(n)
+            out.append(n)
+
+    if discovered:
+        if primary in discovered:
+            add(primary)
+        for m in sorted(discovered, key=_gemini_model_preference_key):
+            add(m)
+        logger.info(
+            "Gemini educator will try %s model(s) from API discovery (preference=%s).",
+            len(out),
+            primary,
+        )
+    else:
+        add(primary)
+        for m in _GEMINI_STATIC_MODEL_CANDIDATES:
+            add(m)
+        logger.info(
+            "Gemini educator using static fallback model list (discovery unavailable)."
+        )
+
+    extras = os.getenv("GEMINI_MODEL_FALLBACKS", "").strip()
+    if extras:
+        for m in (x.strip() for x in extras.split(",") if x.strip()):
+            if not discovered or m in discovered:
+                add(m)
+
+    return out if out else [primary]
+
+
+def _gemini_probe_model_order(api_key: str) -> list[str]:
+    """Models to try for BYOK health probe (same order as educator)."""
+    return _gemini_educator_models_to_try(api_key)
+
+
+def _gemini_error_should_try_next_model(error_code: str) -> bool:
+    """Whether to attempt the next fallback model after a failure."""
+    if error_code in ("gemini_unauthenticated", "gemini_permission_denied"):
+        return False
+    return True
+
+
 FAIL_STARTUP_ON_MISSING_ENABLED_MODELS = _parse_bool_env(
     "FAIL_STARTUP_ON_MISSING_ENABLED_MODELS", default=False
 )
@@ -134,10 +243,35 @@ ENABLE_DENSENET121 = _parse_bool_env("ENABLE_DENSENET121", default=False)
 DENSENET121_PATH = os.getenv(
     "DENSENET121_PATH", "models/best_densenet121_lunglens.pth"
 ).strip()
-ENABLE_MODEL4_SWINT = _parse_bool_env("ENABLE_MODEL4_SWINT", default=False)
-MODEL4_SWINT_PATH = os.getenv(
-    "MODEL4_SWINT_PATH", "models/best_swint_lunglens.pth"
-).strip()
+_MODEL4_SWINT_CANDIDATE_PATHS: tuple[str, ...] = (
+    "models/best_swint_lunglens.pth",
+    "models/best_swin_t_chestxray_6class.pth",
+)
+
+
+def _resolve_model4_swint_weights_path() -> str:
+    """Pick weights file: explicit MODEL4_SWINT_PATH, else first existing candidate."""
+    explicit = os.getenv("MODEL4_SWINT_PATH", "").strip()
+    if explicit:
+        return explicit
+    for rel in _MODEL4_SWINT_CANDIDATE_PATHS:
+        if os.path.isfile(rel):
+            return rel
+    return _MODEL4_SWINT_CANDIDATE_PATHS[0]
+
+
+MODEL4_SWINT_PATH = _resolve_model4_swint_weights_path()
+# ImageFolder alphabetical class order (index 0..N-1). Override to match training folders.
+MODEL4_SWINT_LABELS = _parse_csv(
+    os.getenv(
+        "MODEL4_SWINT_LABELS",
+        "COVID-19,Lung_Opacity,Normal,Pneumonia,Tuberculosis,Viral_Pneumonia",
+    )
+)
+if os.getenv("ENABLE_MODEL4_SWINT") is not None:
+    ENABLE_MODEL4_SWINT = _parse_bool_env("ENABLE_MODEL4_SWINT", default=False)
+else:
+    ENABLE_MODEL4_SWINT = os.path.isfile(MODEL4_SWINT_PATH)
 # DenseNet-121 class mapping is hard-enforced to match checkpoint output indices.
 CLASS_NAMES = ["Normal", "Pneumonia-Bacteria", "Pneumonia-Virus"]
 MAX_UPLOAD_MB = max(int(os.getenv("MAX_UPLOAD_MB", "10")), 1)
@@ -225,6 +359,12 @@ MODEL_REGISTRY: list[dict[str, Any]] = [
         "name": "DenseNet-121",
         "kind": "pytorch",
         "gradcam_target_layer": "features.denseblock4",
+    },
+    {
+        "id": "model4",
+        "health_key": "model4_swint",
+        "name": "Swin-T",
+        "kind": "pytorch",
     },
 ]
 
@@ -450,6 +590,26 @@ def _model4_swint_path_diagnostics() -> dict[str, Any]:
     }
 
 
+def _unwrap_pytorch_state_dict(obj: Any) -> dict[str, Any]:
+    if isinstance(obj, dict):
+        if "state_dict" in obj and isinstance(obj["state_dict"], dict):
+            return obj["state_dict"]
+        if "model_state_dict" in obj and isinstance(obj["model_state_dict"], dict):
+            return obj["model_state_dict"]
+    if not isinstance(obj, dict):
+        raise ValueError("Checkpoint is not a state_dict mapping.")
+    return obj
+
+
+def _swint_checkpoint_num_classes(state_dict: dict[str, Any]) -> int:
+    if "head.weight" in state_dict:
+        return int(state_dict["head.weight"].shape[0])
+    for key, tensor in state_dict.items():
+        if key.endswith("head.weight") or key == "head.1.weight":
+            return int(tensor.shape[0])
+    raise ValueError("Could not infer Swin-T class count from checkpoint head weights.")
+
+
 def _load_swint_model4() -> None:
     global MODEL4_SWINT, MODEL4_SWINT_LOAD_ERROR, PYTORCH_VERSION
     if not ENABLE_MODEL4_SWINT:
@@ -458,7 +618,7 @@ def _load_swint_model4() -> None:
         logger.info("Model 4 (Swin-T) skipped: ENABLE_MODEL4_SWINT is false.")
         return
 
-    if not os.path.exists(MODEL4_SWINT_PATH):
+    if not os.path.isfile(MODEL4_SWINT_PATH):
         MODEL4_SWINT = None
         MODEL4_SWINT_LOAD_ERROR = (
             f"Swin-T model file not found at {MODEL4_SWINT_PATH}."
@@ -476,37 +636,48 @@ def _load_swint_model4() -> None:
             logger.info("PyTorch version: %s", PYTORCH_VERSION)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        model = models.swin_t(weights=None)
-        num_features = model.head.in_features
-        model.head = nn.Sequential(
-            nn.Dropout(0.5),
-            nn.Linear(num_features, 2),
-        )
-        # Load weights safely regardless of train-time device.
         try:
-            state_dict = torch.load(
+            raw_ckpt = torch.load(
                 MODEL4_SWINT_PATH,
                 map_location=torch.device("cpu"),
                 weights_only=True,
             )
         except TypeError:
-            state_dict = torch.load(
+            raw_ckpt = torch.load(
                 MODEL4_SWINT_PATH,
                 map_location=torch.device("cpu"),
             )
-        model.load_state_dict(state_dict)
+        state_dict = _unwrap_pytorch_state_dict(raw_ckpt)
+        num_classes = _swint_checkpoint_num_classes(state_dict)
+        if len(MODEL4_SWINT_LABELS) != num_classes:
+            raise ValueError(
+                f"MODEL4_SWINT_LABELS has {len(MODEL4_SWINT_LABELS)} labels but "
+                f"checkpoint expects {num_classes}. Set MODEL4_SWINT_LABELS to match "
+                "training ImageFolder order (alphabetical by folder name)."
+            )
+
+        model = models.swin_t(weights=None)
+        model.head = nn.Linear(model.head.in_features, num_classes)
+        model.load_state_dict(state_dict, strict=True)
         model.to(device)
         model.eval()
         MODEL4_SWINT = model
         MODEL4_SWINT_LOAD_ERROR = None
-        logger.info("Model 4 (Swin-T) loaded successfully on device=%s.", device)
+        logger.info(
+            "Model 4 (Swin-T) loaded successfully on device=%s path=%s classes=%s labels=%s",
+            device,
+            MODEL4_SWINT_PATH,
+            num_classes,
+            MODEL4_SWINT_LABELS,
+        )
     except Exception as exc:
         MODEL4_SWINT = None
         MODEL4_SWINT_LOAD_ERROR = str(exc)
         logger.exception("FATAL: Failed to load Swin-T model: %s", exc)
 
 
-def _run_swint_model4(image_bytes: bytes) -> tuple[str, float]:
+def _run_swint_model4(image_bytes: bytes) -> tuple[str, float, dict[str, float]]:
+    """Swin-T: top label, confidence [0,1], per-class probabilities."""
     if MODEL4_SWINT is None:
         raise RuntimeError(MODEL4_SWINT_LOAD_ERROR or "Model 4 (Swin-T) is not loaded.")
     import torch
@@ -522,14 +693,20 @@ def _run_swint_model4(image_bytes: bytes) -> tuple[str, float]:
         ]
     )
     input_tensor = transform(image).unsqueeze(0).to(device)
+    n_cls = len(MODEL4_SWINT_LABELS)
 
     with torch.no_grad():
         outputs = MODEL4_SWINT(input_tensor)
         probs = torch.softmax(outputs, dim=1)[0]
         conf, pred_idx = torch.max(probs, 0)
 
-    label = "Pneumonia" if pred_idx.item() == 1 else "Normal"
-    return label, round(float(conf.item()), 3)
+    pred_idx_int = int(pred_idx.item())
+    label = MODEL4_SWINT_LABELS[pred_idx_int]
+    conf01 = round(float(conf.item()), 3)
+    probabilities = {
+        MODEL4_SWINT_LABELS[i]: round(float(probs[i].item()), 4) for i in range(n_cls)
+    }
+    return label, conf01, probabilities
 
 
 def _densenet121_preprocess() -> Any:
@@ -998,18 +1175,334 @@ def _run_copd_screening(patient_data: dict[str, Any]) -> tuple[str, float]:
     return label, round(prediction_prob, 3)
 
 
-def _generate_llm_summary(
-    ml_results: dict[str, Any], patient_data: dict[str, Any], api_key: str | None
-) -> dict[str, str]:
-    if not api_key:
-        return {"status": "skipped", "text": "No Gemini API key provided."}
+def _resolve_educator_gemini_key(form_value: str | None) -> tuple[str | None, str]:
+    """Multipart BYOK first, then server env. Returns (key_or_none, source_label for logs)."""
+    if form_value is not None and str(form_value).strip():
+        return str(form_value).strip(), "multipart_gemini_api_key"
+    for env_name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        v = os.getenv(env_name, "").strip()
+        if v:
+            return v, f"env_{env_name.lower()}"
+    return None, "none"
+
+
+def _classify_gemini_from_message(msg: str) -> str | None:
+    m = msg.lower()
+    if "429" in msg or "resource exhausted" in m or "too many requests" in m:
+        return "gemini_quota"
+    if "quota" in m or "rate limit" in m or "billing" in m:
+        return "gemini_quota"
+    if "401" in msg or "unauthenticated" in m or "api key not valid" in m:
+        return "gemini_unauthenticated"
+    if "403" in msg or "permission denied" in m or "forbidden" in m:
+        return "gemini_permission_denied"
+    if "404" in msg or ("not found" in m and "model" in m):
+        return "gemini_not_found"
+    if "400" in msg or "invalid argument" in m or "malformed" in m:
+        return "gemini_invalid_argument"
+    if "deadline" in m or "timeout" in m or "504" in msg or "408" in msg:
+        return "gemini_timeout"
+    if "503" in msg or "502" in msg or "500" in msg or "unavailable" in m:
+        return "gemini_upstream"
+    if "ssl" in m or "certificate" in m:
+        return "gemini_network"
+    if "name resolution" in m or "failed to resolve" in m or "nodename nor servname" in m:
+        return "gemini_network"
+    if "connection refused" in m or "connection reset" in m:
+        return "gemini_network"
+    return None
+
+
+def _classify_gemini_exception(exc: BaseException) -> str:
+    """Machine-readable llm_evaluation.error_code (no secrets in return value)."""
+    try:
+        from google.api_core import exceptions as gexc
+    except ImportError:
+        gexc = None  # type: ignore[assignment]
 
     try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-2.5-flash")
+        from google.generativeai.types.generation_types import (
+            BrokenResponseError as _BrokenResponseError,
+            IncompleteIterationError as _IncompleteIterationError,
+        )
+    except ImportError:
+        _BrokenResponseError = None  # type: ignore[misc, assignment]
+        _IncompleteIterationError = None  # type: ignore[misc, assignment]
 
-        smoking_status = patient_data.get("smoking_status", patient_data.get("smoking", "Unknown"))
-        prompt = f"""
+    if _BrokenResponseError is not None and isinstance(exc, _BrokenResponseError):
+        return "gemini_broken_response"
+    if _IncompleteIterationError is not None and isinstance(exc, _IncompleteIterationError):
+        return "gemini_incomplete_response"
+
+    if gexc is not None:
+        if isinstance(exc, gexc.Unauthenticated):
+            return "gemini_unauthenticated"
+        if isinstance(exc, gexc.Unauthorized):
+            return "gemini_unauthenticated"
+        if isinstance(exc, gexc.PermissionDenied):
+            return "gemini_permission_denied"
+        if isinstance(exc, gexc.Forbidden):
+            return "gemini_permission_denied"
+        if isinstance(exc, (gexc.ResourceExhausted, gexc.TooManyRequests)):
+            return "gemini_quota"
+        if isinstance(exc, (gexc.InvalidArgument, gexc.BadRequest, gexc.FailedPrecondition)):
+            return "gemini_invalid_argument"
+        if isinstance(exc, (gexc.DeadlineExceeded, gexc.GatewayTimeout)):
+            return "gemini_timeout"
+        if isinstance(
+            exc,
+            (gexc.ServiceUnavailable, gexc.InternalServerError, gexc.BadGateway),
+        ):
+            return "gemini_upstream"
+        if isinstance(exc, gexc.NotFound):
+            return "gemini_not_found"
+        if isinstance(exc, gexc.Cancelled):
+            return "gemini_cancelled"
+
+        if isinstance(exc, gexc.GoogleAPICallError):
+            code = getattr(exc, "code", None)
+            if code == 429:
+                return "gemini_quota"
+            if code == 401:
+                return "gemini_unauthenticated"
+            if code == 403:
+                return "gemini_permission_denied"
+            if code == 404:
+                return "gemini_not_found"
+            if code == 400:
+                return "gemini_invalid_argument"
+            if code in (408, 504):
+                return "gemini_timeout"
+            if isinstance(code, int) and code >= 500:
+                return "gemini_upstream"
+            return "gemini_google_api_error"
+
+    if isinstance(exc, (TimeoutError, ConnectionError, BrokenPipeError)):
+        return "gemini_network"
+
+    if isinstance(exc, OSError):
+        try:
+            import errno as _errno
+
+            if getattr(exc, "errno", None) in {
+                _errno.ECONNREFUSED,
+                _errno.ECONNRESET,
+                _errno.ENETUNREACH,
+                _errno.EHOSTUNREACH,
+                _errno.ETIMEDOUT,
+                _errno.ENETDOWN,
+                _errno.EPIPE,
+            }:
+                return "gemini_network"
+        except Exception:
+            pass
+
+    name = type(exc).__name__
+    if "BlockedPrompt" in name or "StopCandidate" in name:
+        return "gemini_blocked_or_empty"
+
+    hinted = _classify_gemini_from_message(str(exc))
+    if hinted is not None:
+        return hinted
+
+    logger.warning("Educator Gemini: unclassified exception type=%s", name)
+    return "gemini_unknown"
+
+
+def _gemini_health_message(
+    error_code: str,
+    model: str,
+    *,
+    models_tried: list[str] | None = None,
+    last_model: str | None = None,
+    discovered_models: list[str] | None = None,
+) -> str:
+    tried = models_tried or []
+    failed_model = last_model or model
+    if error_code == "gemini_unauthenticated":
+        return (
+            "This does not look like a valid Google AI (Gemini) API key. "
+            "Create one at Google AI Studio (aistudio.google.com/apikey). "
+            "Do not use the LungLens backend API_KEY here."
+        )
+    if error_code == "gemini_permission_denied":
+        return (
+            "The Gemini API key was rejected (permission denied). "
+            "Check that the key is enabled for the Generative Language API."
+        )
+    if error_code == "gemini_quota":
+        return "Gemini quota or rate limit exceeded for this API key. Try again later or check billing in Google AI Studio."
+    if error_code == "gemini_not_found":
+        hint = ""
+        if discovered_models:
+            hint = f" Models available for this key include: {', '.join(discovered_models[:5])}."
+        return (
+            f"The model '{failed_model}' is not available for this API key.{hint} "
+            "Set GEMINI_MODEL on the server to one of those names."
+        )
+    if error_code == "gemini_invalid_argument":
+        if tried:
+            return (
+                "Gemini rejected all models we tried for this API key: "
+                f"{', '.join(tried)}. "
+                "Create or verify your key at Google AI Studio, or set GEMINI_MODEL to a model "
+                "listed under your key in AI Studio."
+            )
+        return (
+            f"Gemini rejected the request for model '{failed_model}'. "
+            "Check your API key in Google AI Studio and set GEMINI_MODEL to a supported model name."
+        )
+    if error_code in ("gemini_blocked_or_empty", "gemini_broken_response", "gemini_incomplete_response"):
+        return "Gemini responded but returned no usable text. Try again or use a different model."
+    if error_code == "gemini_network":
+        return "Could not reach Google Gemini (network error). Check connectivity from the backend host."
+    if error_code == "gemini_timeout":
+        return "Gemini request timed out. Try again."
+    return (
+        f"Could not validate this Gemini API key (last model: '{failed_model}'). "
+        "Use a Google AI Studio API key (not LungLens API_KEY)."
+    )
+
+
+def _list_gemini_models_for_key(api_key: str) -> tuple[bool, str | None]:
+    """Return (ok, error_code). Verifies the key can call the Gemini API at all."""
+    try:
+        genai.configure(api_key=api_key)
+        next(genai.list_models(), None)
+        return True, None
+    except StopIteration:
+        return True, None
+    except Exception as exc:
+        return False, _classify_gemini_exception(exc)
+
+
+def _probe_gemini_model_generate(api_key: str, model_id: str) -> tuple[bool, str | None]:
+    """Single-model minimal generate probe. Returns (ok, error_code)."""
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_id)
+        gen_cfg: Any = None
+        try:
+            gc_cls = getattr(genai, "GenerationConfig", None)
+            if gc_cls is not None:
+                gen_cfg = gc_cls(max_output_tokens=16)
+        except Exception:
+            gen_cfg = None
+        kwargs: dict[str, Any] = {}
+        if gen_cfg is not None:
+            kwargs["generation_config"] = gen_cfg
+        response = model.generate_content(
+            'Reply with exactly the two letters OK and nothing else.',
+            **kwargs,
+        )
+        try:
+            raw = response.text
+        except (ValueError, AttributeError):
+            return False, "gemini_blocked_or_empty"
+        text = (raw or "").strip() if isinstance(raw, str) else ""
+        if not text:
+            return False, "gemini_blocked_or_empty"
+        return True, None
+    except Exception as exc:
+        return False, _classify_gemini_exception(exc)
+
+
+def _probe_user_gemini_key(api_key: str) -> dict[str, Any]:
+    """Validate BYOK: list_models (key) then generate on discovered / fallback models."""
+    preferred = GEMINI_MODEL or "gemini-2.0-flash"
+    discovered = _discover_gemini_generate_model_names(api_key)
+
+    list_ok, list_code = _list_gemini_models_for_key(api_key)
+    if not list_ok:
+        code = list_code or "gemini_unknown"
+        logger.info("Gemini health probe list_models failed: %s", code)
+        return {
+            "status": "invalid",
+            "ok": False,
+            "error_code": code,
+            "message": _gemini_health_message(
+                code, preferred, discovered_models=discovered
+            ),
+            "model": preferred,
+        }
+
+    models_to_try = _gemini_probe_model_order(api_key)
+    if not models_to_try:
+        return {
+            "status": "invalid",
+            "ok": False,
+            "error_code": "gemini_not_found",
+            "message": "No Gemini generateContent models found for this API key.",
+            "model": preferred,
+            "discovered_models": discovered,
+        }
+
+    models_tried: list[str] = []
+    last_code: str | None = None
+    last_model: str | None = None
+    for model_id in models_to_try:
+        models_tried.append(model_id)
+        ok, code = _probe_gemini_model_generate(api_key, model_id)
+        if ok:
+            if model_id != preferred:
+                logger.info(
+                    "Gemini health probe: preferred %s failed; validated with %s",
+                    preferred,
+                    model_id,
+                )
+            return {
+                "status": "ok",
+                "ok": True,
+                "model": model_id,
+                "configured_model": preferred,
+                **(
+                    {
+                        "warning": (
+                            f"Your key works with '{model_id}' but GEMINI_MODEL is "
+                            f"'{preferred}'. Set GEMINI_MODEL={model_id} on the backend for analyze."
+                        )
+                    }
+                    if model_id != preferred
+                    else {}
+                ),
+            }
+        last_code = code
+        last_model = model_id
+        logger.info("Gemini health probe generate failed model=%s code=%s", model_id, code)
+
+    code = last_code or "gemini_unknown"
+    return {
+        "status": "invalid",
+        "ok": False,
+        "error_code": code,
+        "message": _gemini_health_message(
+            code,
+            preferred,
+            models_tried=models_tried,
+            last_model=last_model,
+            discovered_models=discovered,
+        ),
+        "model": last_model or preferred,
+        "models_tried": models_tried,
+        "discovered_models": discovered[:20],
+    }
+
+
+def _generate_llm_summary(
+    ml_results: dict[str, Any], patient_data: dict[str, Any], api_key: str | None
+) -> dict[str, Any]:
+    if not api_key:
+        return {
+            "status": "skipped",
+            "text": (
+                "No Gemini API key available. Provide gemini_api_key on the analyze request "
+                "or set GEMINI_API_KEY or GOOGLE_API_KEY on the server."
+            ),
+            "error_code": "educator_no_api_key",
+        }
+
+    smoking_status = patient_data.get("smoking_status", patient_data.get("smoking", "Unknown"))
+    prompt = f"""
 You are a highly empathetic, professional medical AI educator.
 Your goal is to explain Chest X-ray AI findings to a patient based on their symptoms.
 CRITICAL RULE: You must NEVER definitively diagnose. Always use language like "The AI detected patterns consistent with..." and advise consulting a doctor.
@@ -1030,12 +1523,101 @@ Respond in exactly two sections using Markdown:
 ### 📋 Suggested Next Steps
 (3 actionable, bulleted next steps based on severity.)
 """
-        response = model.generate_content(prompt)
-        text = getattr(response, "text", None) or "Could not generate clinical summary."
-        return {"status": "success", "text": text}
+    models_to_try = _gemini_educator_models_to_try(api_key)
+    last_error: BaseException | None = None
+    last_code: str | None = None
+    last_model: str | None = None
+
+    if not models_to_try:
+        return {
+            "status": "failed",
+            "text": "Could not generate clinical summary due to API model availability.",
+            "error_code": "gemini_not_found",
+        }
+
+    try:
+        genai.configure(api_key=api_key)
+
+        for model_name in models_to_try:
+            try:
+                logger.info("Attempting LLM generation with model: %s", model_name)
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(prompt)
+
+                pf = getattr(response, "prompt_feedback", None)
+                if pf is not None:
+                    logger.info(
+                        "Educator Gemini prompt_feedback model=%s: %s", model_name, pf
+                    )
+
+                try:
+                    raw = response.text
+                except (ValueError, AttributeError) as exc:
+                    last_code = "gemini_blocked_or_empty"
+                    logger.warning(
+                        "Educator Gemini model=%s returned no usable text: %s. Trying next fallback...",
+                        model_name,
+                        exc,
+                    )
+                    continue
+
+                text = (raw or "").strip() if isinstance(raw, str) else ""
+                if not text:
+                    last_code = "gemini_blocked_or_empty"
+                    logger.warning(
+                        "Educator Gemini model=%s returned empty summary text. Trying next fallback...",
+                        model_name,
+                    )
+                    continue
+
+                if model_name != models_to_try[0]:
+                    logger.info(
+                        "Educator Gemini succeeded with fallback model %s (primary was %s).",
+                        model_name,
+                        models_to_try[0],
+                    )
+                return {"status": "success", "text": text}
+
+            except Exception as exc:
+                last_error = exc
+                last_code = _classify_gemini_exception(exc)
+                last_model = model_name
+                logger.warning(
+                    "Educator Gemini failed with model=%s (%s): %s. Trying next fallback...",
+                    model_name,
+                    last_code,
+                    exc,
+                )
+                if not _gemini_error_should_try_next_model(last_code):
+                    break
+                continue
+
+        logger.error(
+            "All LLM generation attempts failed (models_tried=%s). Last error (%s): %s",
+            models_to_try,
+            last_code,
+            last_error,
+            exc_info=last_error is not None,
+        )
+        if last_code in ("gemini_unauthenticated", "gemini_permission_denied"):
+            fail_text = "Could not generate clinical summary."
+        else:
+            fail_text = (
+                "Could not generate clinical summary due to API model availability."
+            )
+        return {
+            "status": "failed",
+            "text": fail_text,
+            "error_code": last_code or "gemini_unknown",
+        }
     except Exception as exc:
-        logger.error("LLM Generation failed: %s", exc)
-        return {"status": "failed", "text": "Could not generate clinical summary."}
+        code = _classify_gemini_exception(exc)
+        logger.error("LLM Generation failed (%s): %s", code, exc, exc_info=True)
+        return {
+            "status": "failed",
+            "text": "Could not generate clinical summary.",
+            "error_code": code,
+        }
 
 
 def _error_response(message: str, status_code: int) -> JSONResponse:
@@ -1484,10 +2066,23 @@ def _build_demo_normal_payload(
     }
     # Keep full DenseNet-shaped model3 from _build_pipeline_outputs (demo_densenet).
     # Do not replace with a minimal dict — clients validate class_id, probabilities, etc.
+    demo_m4_probs = {
+        "COVID-19": 0.01,
+        "Lung_Opacity": 0.01,
+        "Normal": 0.96,
+        "Pneumonia": 0.01,
+        "Tuberculosis": 0.005,
+        "Viral_Pneumonia": 0.005,
+    }
+    # Align demo keys with MODEL4_SWINT_LABELS when env overrides label list.
+    if set(demo_m4_probs) != set(MODEL4_SWINT_LABELS):
+        demo_m4_probs = {lbl: (0.96 if lbl == "Normal" else round(0.04 / max(len(MODEL4_SWINT_LABELS) - 1, 1), 4)) for lbl in MODEL4_SWINT_LABELS}
     payload["model4_swint"] = {
         "prediction": "Normal",
         "confidence": 0.96,
         "status": "success",
+        "probabilities": demo_m4_probs,
+        "model_name": "Swin-T",
     }
     # TODO: Add Model 5 mock here
     # TODO: Add Model 6 mock here
@@ -1600,14 +2195,16 @@ async def _analyze_internal(
             model4_swint_inference_ok = False
             if ENABLE_MODEL4_SWINT and MODEL4_SWINT is not None:
                 try:
-                    model4_swint_label, model4_swint_conf = await asyncio.to_thread(
-                        _run_swint_model4, image_bytes
+                    model4_swint_label, model4_swint_conf, model4_swint_probs = (
+                        await asyncio.to_thread(_run_swint_model4, image_bytes)
                     )
                     model4_swint_conf = round(float(model4_swint_conf), 3)
                     model4_swint_result = {
                         "prediction": model4_swint_label,
                         "confidence": model4_swint_conf,
                         "status": "success",
+                        "probabilities": model4_swint_probs,
+                        "model_name": "Swin-T",
                     }
                     model4_swint_inference_ok = True
                 except Exception as exc:
@@ -1710,11 +2307,22 @@ async def _analyze_internal(
             "Model 2 (ResNetV2)": payload.get("model2", {}).get("prediction"),
             "COPD Risk": payload.get("copd_screening", {}).get("prediction"),
         }
+        gemini_resolved, gemini_key_source = _resolve_educator_gemini_key(gemini_api_key)
+        _educator_models = (
+            _gemini_educator_models_to_try(gemini_resolved) if gemini_resolved else []
+        )
+        logger.info(
+            "Educator Gemini: key_source=%s key_length=%s will_invoke_llm=%s models=%s",
+            gemini_key_source,
+            len(gemini_resolved) if gemini_resolved else 0,
+            bool(gemini_resolved),
+            _educator_models[:5],
+        )
         llm_result = await asyncio.to_thread(
             _generate_llm_summary,
             ml_summary,
             patient_data or {},
-            gemini_api_key,
+            gemini_resolved,
         )
         payload["llm_evaluation"] = llm_result
         return JSONResponse(status_code=200, content=payload)
@@ -1800,6 +2408,13 @@ async def health() -> dict[str, Any]:
                 "error": MODEL_DENSENET121_LOAD_ERROR,
                 "labels": list(CLASS_NAMES),
             },
+            "model4_swint": {
+                "enabled": ENABLE_MODEL4_SWINT,
+                "loaded": MODEL4_SWINT is not None,
+                **_model4_swint_path_diagnostics(),
+                "error": MODEL4_SWINT_LOAD_ERROR,
+                "labels": list(MODEL4_SWINT_LABELS),
+            },
         },
     }
 
@@ -1815,7 +2430,9 @@ async def debug_model_status() -> dict[str, Any]:
     m1_ready = ENABLE_MODEL1 and MODEL1_PT is not None
     m2_ready = ENABLE_MODEL2_H5 and MODEL2_H5 is not None
     m3_ready = ENABLE_DENSENET121 and MODEL_DENSENET121 is not None
-    hybrid_preview = m1_ready or m2_ready or m3_ready
+    m4_ready = ENABLE_MODEL4_SWINT and MODEL4_SWINT is not None
+    m4_diag = _model4_swint_path_diagnostics()
+    hybrid_preview = m1_ready or m2_ready or m3_ready or m4_ready
     return {
         "model_registry": MODEL_REGISTRY,
         "model1_pt": {
@@ -1841,6 +2458,13 @@ async def debug_model_status() -> dict[str, Any]:
             "predict_endpoint": "/predict/densenet",
             "gradcam_target_layer": "features.denseblock4",
         },
+        "model4_swint": {
+            "enabled": ENABLE_MODEL4_SWINT,
+            "loaded": MODEL4_SWINT is not None,
+            "load_error": MODEL4_SWINT_LOAD_ERROR,
+            **m4_diag,
+            "labels": list(MODEL4_SWINT_LABELS),
+        },
         "tensorflow_version": tf_ver,
         "pytorch_version": pt_ver,
         "environment": ENVIRONMENT,
@@ -1858,8 +2482,8 @@ async def debug_model_status() -> dict[str, Any]:
         "analyze_provenance_notes": {
             "findings": (
                 "Aggregated predictions are built only from non-Normal outputs of "
-                "ML Model 1 (PyTorch), ML Model 2 (H5), and DenseNet-121 when each runs "
-                "successfully; otherwise the dict is {'Normal': 1.0}. Top-level gradcam "
+                "ML Model 1 (PyTorch), ML Model 2 (H5), Model 4 (Swin-T), and DenseNet-121 "
+                "when each runs successfully; otherwise the dict is {'Normal': 1.0}. Top-level gradcam "
                 "heatmap_base64 is reserved and may be empty; model1/model3 expose their "
                 "own Grad-CAM when neural paths succeed."
             ),
@@ -1944,6 +2568,42 @@ async def generate_questions(
         status_code=200,
         content={"status": "success", "suggested_questions": suggested_questions},
     )
+
+
+@app.post("/api/v1/gemini/health-check")
+async def gemini_api_key_health_check(
+    gemini_api_key: str | None = Form(None),
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> JSONResponse:
+    """Validate a user-supplied Gemini API key before continuing (e.g. Next on upload step).
+
+    If ``gemini_api_key`` is blank or whitespace-only, returns ``skipped`` with ``ok: true`` so
+    the client can skip validation when BYOK is optional.
+
+    Multipart field name matches ``POST /api/v1/analyze`` (``gemini_api_key``).
+    """
+    auth_error = _validate_api_key(x_api_key)
+    if auth_error is not None:
+        return auth_error
+
+    raw = (gemini_api_key or "").strip()
+    if not raw:
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "skipped",
+                "ok": True,
+                "message": "No API key provided; validation skipped.",
+            },
+        )
+
+    logger.info(
+        "Gemini health probe: key_length=%s models=%s",
+        len(raw),
+        _gemini_educator_models_to_try(raw)[:5],
+    )
+    result = await asyncio.to_thread(_probe_user_gemini_key, raw)
+    return JSONResponse(status_code=200, content=result)
 
 
 @app.post("/api/v1/analyze")
