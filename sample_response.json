@@ -21,15 +21,16 @@
     "model_name": "ResNet50-3Class"
   },
   "model2": {
-    "prediction": "Normal",
-    "confidence": 0.98,
+    "prediction": "Low COPD Risk",
+    "confidence": 0.91,
     "status": "success",
+    "input_type": "tabular",
+    "model_name": "Chronic Lung Risk (COPD)",
+    "label": "Low COPD Risk",
     "probabilities": {
-      "Normal": 0.98,
-      "Lung Opacity": 0.01,
-      "Viral Pneumonia": 0.01
-    },
-    "label": "Normal"
+      "Low COPD Risk": 0.91,
+      "High COPD Risk": 0.09
+    }
   },
   "gate": {
     "route": "early_stop",
@@ -95,7 +96,7 @@
     "model2": {
       "source": "model",
       "status": "ok",
-      "model_id": "h5-model2",
+      "model_id": "model2-tabular-copd",
       "model_version": "pilot"
     },
     "model3": {
@@ -136,11 +137,6 @@
       "Pneumonia": 0.02
     },
     "model_name": "Model 5 (DenseNet-121)"
-  },
-  "copd_screening": {
-    "prediction": "Low COPD Risk",
-    "confidence": 0.91,
-    "status": "success"
   },
   "llm_evaluation": {
     "status": "success",
