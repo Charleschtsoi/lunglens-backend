@@ -127,6 +127,16 @@
     },
     "model_name": "Swin-T"
   },
+  "model5_densenet": {
+    "prediction": "Normal",
+    "confidence": 0.98,
+    "status": "success",
+    "probabilities": {
+      "Normal": 0.98,
+      "Pneumonia": 0.02
+    },
+    "model_name": "Model 5 (DenseNet-121)"
+  },
   "copd_screening": {
     "prediction": "Low COPD Risk",
     "confidence": 0.91,
@@ -134,6 +144,6 @@
   },
   "llm_evaluation": {
     "status": "success",
-    "text": "### 🩺 Clinical Observation\n\nThe AI detected patterns consistent with a normal chest X-ray, and your reported symptoms (mild cough for a few days, no fever) are reassuring in context. This is educational information only—not a diagnosis.\n\n### 📋 Suggested Next Steps\n\n- Share these results with your primary care clinician if symptoms persist or worsen.\n- Monitor cough and breathing; seek care if you develop fever or worsening shortness of breath.\n- Follow your clinician's advice on follow-up imaging if needed."
+    "text": "### 🩺 Clinical Observation\n\nThe AI detected patterns consistent with a normal chest X-ray, and your reported symptoms (mild cough for a few days, no fever) are reassuring in context. This is educational information only—not a diagnosis.\n\n### 📋 Suggested Next Steps\n\n- Share these results with your primary care clinician if symptoms persist or worsen.\n- Monitor cough and breathing; seek care if you develop fever or worsening shortness of breath.\n- Follow your clinician's advice on follow-up imaging if needed.\n\n### ❓ Questions to Ask Your Doctor\n\n- Given my cough duration and these imaging results, when should I seek follow-up care?\n- Could my smoking history change how you interpret these AI findings?\n- Are there any symptoms that should prompt urgent evaluation?"
   }
 }

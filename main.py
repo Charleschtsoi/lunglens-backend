@@ -272,6 +272,24 @@ if os.getenv("ENABLE_MODEL4_SWINT") is not None:
     ENABLE_MODEL4_SWINT = _parse_bool_env("ENABLE_MODEL4_SWINT", default=False)
 else:
     ENABLE_MODEL4_SWINT = os.path.isfile(MODEL4_SWINT_PATH)
+MODEL5_DENSENET_PATH = (
+    os.getenv("MODEL5_DENSENET_PATH", "models/best_model_DENSENET121.h5").strip()
+)
+# ML Model 5 (Keras DenseNet-121 H5): softmax size must match len(MODEL5_DENSENET_LABELS).
+# Default: NIH ChestX-ray 14 classes in ImageFolder alphabetical order (index 0..13).
+# Override via MODEL5_DENSENET_LABELS if Dicky's training used different folder names/order.
+MODEL5_DENSENET_LABELS = _parse_csv(
+    os.getenv(
+        "MODEL5_DENSENET_LABELS",
+        "Atelectasis,Cardiomegaly,Consolidation,Edema,Effusion,Emphysema,Fibrosis,Hernia,"
+        "Infiltration,Mass,Nodule,Pleural_Thickening,Pneumonia,Pneumothorax",
+    )
+)
+MODEL5_DENSENET_IMAGE_SIZE: tuple[int, int] = (224, 224)
+if os.getenv("ENABLE_MODEL5_DENSENET") is not None:
+    ENABLE_MODEL5_DENSENET = _parse_bool_env("ENABLE_MODEL5_DENSENET", default=False)
+else:
+    ENABLE_MODEL5_DENSENET = os.path.isfile(MODEL5_DENSENET_PATH)
 # DenseNet-121 class mapping is hard-enforced to match checkpoint output indices.
 CLASS_NAMES = ["Normal", "Pneumonia-Bacteria", "Pneumonia-Virus"]
 MAX_UPLOAD_MB = max(int(os.getenv("MAX_UPLOAD_MB", "10")), 1)
@@ -334,6 +352,8 @@ MODEL_DENSENET121_LOAD_ERROR: str | None = None
 _DENSENET121_PREPROCESS: Any = None
 MODEL4_SWINT: Any = None
 MODEL4_SWINT_LOAD_ERROR: str | None = None
+MODEL5_DENSENET_H5: Any = None
+MODEL5_DENSENET_LOAD_ERROR: str | None = None
 TENSORFLOW_VERSION: str | None = None
 PYTORCH_VERSION: str | None = None
 _MODEL2_FILE_MISSING_WARNED = False
@@ -366,6 +386,12 @@ MODEL_REGISTRY: list[dict[str, Any]] = [
         "name": "Swin-T",
         "kind": "pytorch",
     },
+    {
+        "id": "model5",
+        "health_key": "model5_densenet_h5",
+        "name": "DenseNet-121 (H5)",
+        "kind": "keras",
+    },
 ]
 
 
@@ -387,6 +413,10 @@ def _registry_health_aliases() -> dict[str, Any]:
         "model4_swint": {
             "enabled": ENABLE_MODEL4_SWINT,
             "loaded": MODEL4_SWINT is not None,
+        },
+        "model5_densenet_h5": {
+            "enabled": ENABLE_MODEL5_DENSENET,
+            "loaded": MODEL5_DENSENET_H5 is not None,
         },
     }
 
@@ -709,6 +739,168 @@ def _run_swint_model4(image_bytes: bytes) -> tuple[str, float, dict[str, float]]
     return label, conf01, probabilities
 
 
+def _model5_densenet_path_diagnostics() -> dict[str, Any]:
+    abs_path = os.path.abspath(MODEL5_DENSENET_PATH)
+    exists = os.path.isfile(abs_path)
+    size_bytes: int | None = None
+    if exists:
+        try:
+            size_bytes = os.path.getsize(abs_path)
+        except OSError as exc:
+            logger.warning("Could not stat Model 5 H5 file %s: %s", abs_path, exc)
+    return {
+        "path": MODEL5_DENSENET_PATH,
+        "absolute_path": abs_path,
+        "exists": exists,
+        "size_bytes": size_bytes,
+    }
+
+
+def _model5_label_for_api(raw: str) -> str:
+    return raw.replace("_", " ")
+
+
+def _h5_output_num_classes(model: Any) -> int:
+    shape = getattr(model, "output_shape", None)
+    if shape is None:
+        raise ValueError("Keras model has no output_shape.")
+    if isinstance(shape, (list, tuple)) and len(shape) >= 2:
+        dim = shape[-1]
+        if dim is not None:
+            return int(dim)
+    raise ValueError(f"Could not infer class count from output_shape={shape!r}.")
+
+
+def _load_densenet_model5() -> None:
+    global MODEL5_DENSENET_H5, MODEL5_DENSENET_LOAD_ERROR, TENSORFLOW_VERSION
+    if not ENABLE_MODEL5_DENSENET:
+        MODEL5_DENSENET_H5 = None
+        MODEL5_DENSENET_LOAD_ERROR = None
+        logger.info("Model 5 (DenseNet-121 H5) skipped: ENABLE_MODEL5_DENSENET is false.")
+        return
+
+    if not MODEL5_DENSENET_LABELS:
+        MODEL5_DENSENET_H5 = None
+        MODEL5_DENSENET_LOAD_ERROR = "MODEL5_DENSENET_LABELS must not be empty."
+        logger.error("%s", MODEL5_DENSENET_LOAD_ERROR)
+        return
+
+    diag = _model5_densenet_path_diagnostics()
+    path = diag["absolute_path"]
+    logger.info(
+        "Model 5 (DenseNet-121 H5) load starting: path=%r absolute_path=%r exists=%s "
+        "size_bytes=%s labels=%r",
+        diag["path"],
+        path,
+        diag["exists"],
+        diag["size_bytes"],
+        MODEL5_DENSENET_LABELS,
+    )
+    if not diag["exists"]:
+        MODEL5_DENSENET_H5 = None
+        MODEL5_DENSENET_LOAD_ERROR = (
+            f"Model 5 H5 file not found at {path!r} "
+            f"(from MODEL5_DENSENET_PATH={diag['path']!r})."
+        )
+        logger.warning("%s Model 5 disabled.", MODEL5_DENSENET_LOAD_ERROR)
+        return
+
+    try:
+        import tensorflow as tf  # type: ignore
+
+        if TENSORFLOW_VERSION is None:
+            TENSORFLOW_VERSION = str(tf.__version__)
+            logger.info("TensorFlow version: %s", TENSORFLOW_VERSION)
+        tf.keras.mixed_precision.set_global_policy("mixed_float16")
+        co = _make_h5_custom_objects(tf)
+        try:
+            logger.info("Model 5 H5: attempting tf.keras.models.load_model (direct).")
+            model = tf.keras.models.load_model(path, compile=False, custom_objects=co)
+        except Exception:
+            logger.warning(
+                "Model 5 H5 direct load failed; trying compat path.",
+                exc_info=True,
+            )
+            model = _load_h5_model_compat(tf, path)
+
+        num_classes = _h5_output_num_classes(model)
+        if len(MODEL5_DENSENET_LABELS) != num_classes:
+            raise ValueError(
+                f"MODEL5_DENSENET_LABELS has {len(MODEL5_DENSENET_LABELS)} labels but "
+                f"checkpoint expects {num_classes}. Set MODEL5_DENSENET_LABELS to match "
+                "training class order (index 0..N-1). Default assumes NIH ChestX-ray 14 "
+                "classes in ImageFolder alphabetical order — confirm with Dicky."
+            )
+
+        MODEL5_DENSENET_H5 = model
+        MODEL5_DENSENET_LOAD_ERROR = None
+        logger.info(
+            "Model 5 (DenseNet-121 H5) loaded successfully: %s classes=%s labels=%s",
+            path,
+            num_classes,
+            MODEL5_DENSENET_LABELS,
+        )
+    except Exception as exc:
+        MODEL5_DENSENET_H5 = None
+        MODEL5_DENSENET_LOAD_ERROR = str(exc)
+        logger.exception("Failed to load Model 5 (DenseNet-121 H5): %s", exc)
+
+
+def _preprocess_model5_densenet_numpy(image_bytes: bytes) -> Any:
+    """Model 5: RGB 224×224, DenseNet preprocess_input (fallback /255)."""
+    import numpy as np  # type: ignore
+
+    w, h = MODEL5_DENSENET_IMAGE_SIZE
+    image = Image.open(BytesIO(image_bytes)).convert("RGB")
+    image = image.resize((w, h), Image.Resampling.BILINEAR)
+    img_array = np.asarray(image, dtype=np.float32)
+    try:
+        from tensorflow.keras.applications.densenet import preprocess_input  # type: ignore
+
+        img_array = preprocess_input(img_array)
+    except Exception:
+        logger.warning(
+            "DenseNet preprocess_input unavailable for Model 5; falling back to /255.0."
+        )
+        img_array = img_array / 255.0
+    return np.expand_dims(img_array, axis=0)
+
+
+def _model5_decode_scores(row: Any) -> tuple[str, float, dict[str, float]]:
+    import numpy as np  # type: ignore
+
+    arr = np.asarray(row, dtype=np.float64).reshape(-1)
+    exp = np.exp(arr - np.max(arr))
+    probs = exp / np.sum(exp)
+    idx = int(np.argmax(probs))
+    raw_label = MODEL5_DENSENET_LABELS[idx]
+    label = _model5_label_for_api(raw_label)
+    confidence = round(float(probs[idx]), 3)
+    probabilities = {
+        _model5_label_for_api(MODEL5_DENSENET_LABELS[i]): round(float(probs[i]), 4)
+        for i in range(len(MODEL5_DENSENET_LABELS))
+    }
+    return label, confidence, probabilities
+
+
+def _run_densenet_model5(image_bytes: bytes) -> dict[str, Any]:
+    """Model 5 (Keras DenseNet-121 H5): standard analyze block payload."""
+    if MODEL5_DENSENET_H5 is None:
+        raise RuntimeError(
+            MODEL5_DENSENET_LOAD_ERROR or "Model 5 (DenseNet-121 H5) is not loaded."
+        )
+    batch = _preprocess_model5_densenet_numpy(image_bytes)
+    out = MODEL5_DENSENET_H5.predict(batch, verbose=0)
+    label, confidence, probabilities = _model5_decode_scores(out[0])
+    return {
+        "prediction": label,
+        "confidence": confidence,
+        "status": "success",
+        "probabilities": probabilities,
+        "model_name": "Model 5 (DenseNet-121)",
+    }
+
+
 def _densenet121_preprocess() -> Any:
     """Strict 224×224 resize + ImageNet normalization."""
     global _DENSENET121_PREPROCESS
@@ -872,6 +1064,13 @@ def _missing_enabled_model_files() -> list[str]:
         if not d4["exists"]:
             missing.append(
                 f"model4 missing: MODEL4_SWINT_PATH={d4['path']!r} absolute_path={d4['absolute_path']!r}"
+            )
+    if ENABLE_MODEL5_DENSENET:
+        d5 = _model5_densenet_path_diagnostics()
+        if not d5["exists"]:
+            missing.append(
+                f"model5 missing: MODEL5_DENSENET_PATH={d5['path']!r} "
+                f"absolute_path={d5['absolute_path']!r}"
             )
     return missing
 
@@ -1488,6 +1687,85 @@ def _probe_user_gemini_key(api_key: str) -> dict[str, Any]:
     }
 
 
+def _vision_model_confidence_01(block: dict[str, Any] | None) -> float | None:
+    """Normalize model block confidence to [0, 1] for educator context."""
+    if not block or block.get("status") == "failed":
+        return None
+    if "confidence_score" in block:
+        score = float(block["confidence_score"])
+        return score if score <= 1.0 else score / 100.0
+    if "confidence" in block:
+        score = float(block["confidence"])
+        return score if score <= 1.0 else score / 100.0
+    return None
+
+
+def _format_vision_model_for_llm(label: str, block: dict[str, Any] | None) -> str:
+    if not block or block.get("status") == "failed":
+        return f"{label}: unavailable"
+    pred = (
+        block.get("prediction")
+        or block.get("class_name")
+        or block.get("label")
+        or "N/A"
+    )
+    conf = _vision_model_confidence_01(block)
+    if conf is not None:
+        return f"{label}: {pred} (confidence {conf:.0%})"
+    return f"{label}: {pred}"
+
+
+def _build_educator_ml_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    """Structured ML context for Gemini: all five vision models + COPD screening."""
+    predictions = payload.get("predictions") or {}
+    primary = (
+        max(predictions, key=predictions.get)
+        if predictions
+        else "Normal"
+    )
+    return {
+        "Primary Finding (ensemble)": primary,
+        "Model 1 (ResNet-50)": _format_vision_model_for_llm(
+            "ResNet-50", payload.get("model1")
+        ),
+        "Model 2 (ResNet-152V2 H5)": _format_vision_model_for_llm(
+            "ResNet-152V2", payload.get("model2")
+        ),
+        "Model 3 (DenseNet-121 PyTorch)": _format_vision_model_for_llm(
+            "DenseNet-121", payload.get("model3")
+        ),
+        "Model 4 (Swin-T)": _format_vision_model_for_llm(
+            "Swin-T", payload.get("model4_swint")
+        ),
+        "Model 5 (DenseNet-121 H5)": _format_vision_model_for_llm(
+            "DenseNet-121 H5", payload.get("model5_densenet")
+        ),
+        "COPD Screening (tabular)": _format_vision_model_for_llm(
+            "COPD", payload.get("copd_screening")
+        ),
+    }
+
+
+def _format_patient_profile_for_educator(patient_data: dict[str, Any]) -> str:
+    smoking_status = patient_data.get(
+        "smoking_status", patient_data.get("smoking", "Unknown")
+    )
+    fever_val = patient_data.get("fever")
+    if fever_val is None:
+        fever_line = "Unknown"
+    else:
+        fever_line = "Yes" if fever_val else "No"
+    breathing = patient_data.get("breathing_difficulty", "Unknown")
+    cough_days = patient_data.get("cough_duration_days", "Unknown")
+    return (
+        f"- Age: {patient_data.get('age', 'Unknown')}\n"
+        f"- Fever: {fever_line}\n"
+        f"- Cough Duration: {cough_days} days\n"
+        f"- Smoking Status: {smoking_status}\n"
+        f"- Breathing Difficulty: {breathing}"
+    )
+
+
 def _generate_llm_summary(
     ml_results: dict[str, Any], patient_data: dict[str, Any], api_key: str | None
 ) -> dict[str, Any]:
@@ -1501,27 +1779,27 @@ def _generate_llm_summary(
             "error_code": "educator_no_api_key",
         }
 
-    smoking_status = patient_data.get("smoking_status", patient_data.get("smoking", "Unknown"))
+    patient_profile = _format_patient_profile_for_educator(patient_data)
     prompt = f"""
 You are a highly empathetic, professional medical AI educator.
 Your goal is to explain Chest X-ray AI findings to a patient based on their symptoms.
 CRITICAL RULE: You must NEVER definitively diagnose. Always use language like "The AI detected patterns consistent with..." and advise consulting a doctor.
 
-Patient Profile:
-- Age: {patient_data.get("age", "Unknown")}
-- Fever: {"Yes" if patient_data.get("fever") else "No"}
-- Cough Duration: {patient_data.get("cough_duration_days", 0)} days
-- Smoking Status: {smoking_status}
+Patient Profile (clinical intake questionnaire):
+{patient_profile}
 
-AI Findings:
+AI Findings (five vision models + COPD screening):
 {ml_results}
 
-Respond in exactly two sections using Markdown:
+Respond in exactly three sections using Markdown:
 ### 🩺 Clinical Observation
 (2-3 sentences combining their symptoms with the AI findings for a layman.)
 
 ### 📋 Suggested Next Steps
-(3 actionable, bulleted next steps based on severity.)
+(3 actionable, bulleted next steps based on severity and questionnaire answers.)
+
+### ❓ Questions to Ask Your Doctor
+(2-3 specific bullet questions tailored to their symptoms, smoking history, and AI findings.)
 """
     models_to_try = _gemini_educator_models_to_try(api_key)
     last_error: BaseException | None = None
@@ -2084,7 +2362,18 @@ def _build_demo_normal_payload(
         "probabilities": demo_m4_probs,
         "model_name": "Swin-T",
     }
-    # TODO: Add Model 5 mock here
+    # Contract baseline for model5_densenet (demo + sample_response.json). Live inference
+    # may return more classes when MODEL5_DENSENET_LABELS has 14 NIH labels.
+    payload["model5_densenet"] = {
+        "prediction": "Normal",
+        "confidence": 0.98,
+        "status": "success",
+        "probabilities": {
+            "Normal": 0.98,
+            "Pneumonia": 0.02,
+        },
+        "model_name": "Model 5 (DenseNet-121)",
+    }
     # TODO: Add Model 6 mock here
     payload["copd_screening"] = {
         "prediction": "Low COPD Risk",
@@ -2092,6 +2381,44 @@ def _build_demo_normal_payload(
         "status": "success",
     }
     return payload
+
+
+async def _timed_thread_call(
+    fn: Any, *args: Any
+) -> tuple[Any, float, BaseException | None]:
+    start = time.perf_counter()
+    try:
+        result = await asyncio.to_thread(fn, *args)
+        return result, (time.perf_counter() - start) * 1000.0, None
+    except BaseException as exc:
+        return None, (time.perf_counter() - start) * 1000.0, exc
+
+
+async def _analyze_run_vision_models(image_bytes: bytes) -> dict[str, Any]:
+    """Run all enabled vision models concurrently (thread pool)."""
+    pending: dict[str, Any] = {}
+
+    if ENABLE_MODEL1 and MODEL1_PT is not None:
+        pending["model1"] = _timed_thread_call(_run_pytorch_model1_full, image_bytes)
+    if ENABLE_MODEL2_H5:
+        _warn_model2_file_missing_once("analyze")
+    if ENABLE_MODEL2_H5 and MODEL2_H5 is not None:
+        pending["model2"] = _timed_thread_call(_run_h5_model2, image_bytes)
+    if ENABLE_MODEL4_SWINT and MODEL4_SWINT is not None:
+        pending["model4"] = _timed_thread_call(_run_swint_model4, image_bytes)
+    if ENABLE_MODEL5_DENSENET and MODEL5_DENSENET_H5 is not None:
+        pending["model5"] = _timed_thread_call(_run_densenet_model5, image_bytes)
+    if ENABLE_DENSENET121 and MODEL_DENSENET121 is not None:
+        pending["model3"] = _timed_thread_call(
+            _densenet121_predict_and_cam, image_bytes
+        )
+
+    if not pending:
+        return {}
+
+    keys = list(pending.keys())
+    gathered = await asyncio.gather(*pending.values())
+    return dict(zip(keys, gathered, strict=True))
 
 
 async def _analyze_internal(
@@ -2149,41 +2476,14 @@ async def _analyze_internal(
             model1_probabilities: dict[str, float] | None = None
             m1_label = "Normal"
             m1_conf_r = 0.0
-            t_model1_start = time.perf_counter()
-            if ENABLE_MODEL1 and MODEL1_PT is not None:
-                try:
-                    m1_label, m1_conf, m1_probs, m1_gc = await asyncio.to_thread(
-                        _run_pytorch_model1_full, image_bytes
-                    )
-                    m1_conf_r = round(float(m1_conf), 3)
-                    model1_override = (m1_label, m1_conf_r)
-                    model1_gradcam_b64 = m1_gc
-                    model1_probabilities = m1_probs
-                    model1_pytorch_inference_ok = True
-                except Exception as exc:
-                    logger.warning("ML Model 1 PyTorch inference failed: %s", exc)
-            timing_model1_ms = (time.perf_counter() - t_model1_start) * 1000.0
+            timing_model1_ms = 0.0
 
             model2_override: tuple[str, float] | None = None
             model2_h5_inference_ok = False
             model2_probabilities: dict[str, float] | None = None
             h5_label = "Normal"
             h5_conf_r = 0.0
-            t_model2_start = time.perf_counter()
-            if ENABLE_MODEL2_H5:
-                _warn_model2_file_missing_once("analyze")
-            if ENABLE_MODEL2_H5 and MODEL2_H5 is not None:
-                try:
-                    h5_label, h5_conf, h5_probs = await asyncio.to_thread(
-                        _run_h5_model2, image_bytes
-                    )
-                    h5_conf_r = round(float(h5_conf), 3)
-                    model2_override = (h5_label, h5_conf_r)
-                    model2_probabilities = h5_probs
-                    model2_h5_inference_ok = True
-                except Exception as exc:
-                    logger.warning("ML Model 2 H5 inference failed: %s", exc)
-            timing_model2_ms = (time.perf_counter() - t_model2_start) * 1000.0
+            timing_model2_ms = 0.0
 
             model4_swint_result: dict[str, Any] = {
                 "prediction": "N/A",
@@ -2193,11 +2493,48 @@ async def _analyze_internal(
             model4_swint_label = "Normal"
             model4_swint_conf = 0.0
             model4_swint_inference_ok = False
-            if ENABLE_MODEL4_SWINT and MODEL4_SWINT is not None:
-                try:
-                    model4_swint_label, model4_swint_conf, model4_swint_probs = (
-                        await asyncio.to_thread(_run_swint_model4, image_bytes)
-                    )
+
+            model5_densenet_result: dict[str, Any] = {
+                "prediction": "N/A",
+                "confidence": 0.0,
+                "status": "failed",
+            }
+            model5_label = ""
+            model5_conf = 0.0
+            model5_inference_ok = False
+
+            densenet_payload: dict[str, Any] = _densenet_analyze_error_payload()
+            timing_densenet_ms = 0.0
+
+            vision_results = await _analyze_run_vision_models(image_bytes)
+
+            if "model1" in vision_results:
+                m1_data, timing_model1_ms, m1_err = vision_results["model1"]
+                if m1_err is None and m1_data is not None:
+                    m1_label, m1_conf, m1_probs, m1_gc = m1_data
+                    m1_conf_r = round(float(m1_conf), 3)
+                    model1_override = (m1_label, m1_conf_r)
+                    model1_gradcam_b64 = m1_gc
+                    model1_probabilities = m1_probs
+                    model1_pytorch_inference_ok = True
+                else:
+                    logger.warning("ML Model 1 PyTorch inference failed: %s", m1_err)
+
+            if "model2" in vision_results:
+                m2_data, timing_model2_ms, m2_err = vision_results["model2"]
+                if m2_err is None and m2_data is not None:
+                    h5_label, h5_conf, h5_probs = m2_data
+                    h5_conf_r = round(float(h5_conf), 3)
+                    model2_override = (h5_label, h5_conf_r)
+                    model2_probabilities = h5_probs
+                    model2_h5_inference_ok = True
+                else:
+                    logger.warning("ML Model 2 H5 inference failed: %s", m2_err)
+
+            if "model4" in vision_results:
+                m4_data, _m4_ms, m4_err = vision_results["model4"]
+                if m4_err is None and m4_data is not None:
+                    model4_swint_label, model4_swint_conf, model4_swint_probs = m4_data
                     model4_swint_conf = round(float(model4_swint_conf), 3)
                     model4_swint_result = {
                         "prediction": model4_swint_label,
@@ -2207,27 +2544,33 @@ async def _analyze_internal(
                         "model_name": "Swin-T",
                     }
                     model4_swint_inference_ok = True
-                except Exception as exc:
-                    logger.error("Model 4 (Swin-T) inference failed: %s", exc)
+                else:
+                    logger.error("Model 4 (Swin-T) inference failed: %s", m4_err)
 
-            densenet_payload: dict[str, Any] = _densenet_analyze_error_payload()
-            timing_densenet_ms = 0.0
-            if ENABLE_DENSENET121 and MODEL_DENSENET121 is not None:
-                t_dn0 = time.perf_counter()
-                try:
-                    dn = await asyncio.to_thread(
-                        _densenet121_predict_and_cam, image_bytes
+            if "model5" in vision_results:
+                m5_data, _m5_ms, m5_err = vision_results["model5"]
+                if m5_err is None and isinstance(m5_data, dict):
+                    model5_densenet_result = m5_data
+                    model5_label = str(model5_densenet_result.get("prediction", ""))
+                    model5_conf = float(model5_densenet_result.get("confidence", 0.0))
+                    model5_inference_ok = (
+                        model5_densenet_result.get("status") == "success"
                     )
-                    densenet_payload = {**dn, "model_name": "DenseNet-121"}
-                except Exception as exc:
+                else:
+                    logger.error("Model 5 (DenseNet-121 H5) inference failed: %s", m5_err)
+
+            if "model3" in vision_results:
+                m3_data, timing_densenet_ms, m3_err = vision_results["model3"]
+                if m3_err is None and isinstance(m3_data, dict):
+                    densenet_payload = {**m3_data, "model_name": "DenseNet-121"}
+                else:
                     logger.warning(
                         "DenseNet-121 in analyze pipeline failed (model1/model2 unaffected): %s",
-                        exc,
+                        m3_err,
                     )
                     densenet_payload = _densenet_analyze_error_payload(
-                        (str(exc) or "Model not available")[:500]
+                        (str(m3_err) or "Model not available")[:500]
                     )
-                timing_densenet_ms = (time.perf_counter() - t_dn0) * 1000.0
 
             densenet_neural_ok = (
                 "prediction" in densenet_payload and "error" not in densenet_payload
@@ -2246,6 +2589,15 @@ async def _analyze_internal(
                 )
                 predictions[m4_base] = max(
                     predictions.get(m4_base, 0.0), model4_swint_conf
+                )
+            if (
+                model5_inference_ok
+                and model5_label
+                and model5_label != "Normal"
+                and model5_conf >= 0.5
+            ):
+                predictions[model5_label] = max(
+                    predictions.get(model5_label, 0.0), model5_conf
                 )
             m3_class_name = str(densenet_payload.get("class_name", densenet_payload.get("prediction", "")))
             if densenet_neural_ok and m3_class_name and m3_class_name != "Normal":
@@ -2297,16 +2649,15 @@ async def _analyze_internal(
             if copd_result:
                 payload["copd_screening"] = copd_result
             payload["model4_swint"] = model4_swint_result
+            payload["model5_densenet"] = model5_densenet_result
 
-        predictions_for_llm: dict[str, float] = payload.get("predictions") or {}
-        ml_summary = {
-            "Primary Finding": max(predictions_for_llm, key=predictions_for_llm.get)
-            if predictions_for_llm
-            else "Normal",
-            "Model 1 (ResNet)": payload.get("model1", {}).get("prediction"),
-            "Model 2 (ResNetV2)": payload.get("model2", {}).get("prediction"),
-            "COPD Risk": payload.get("copd_screening", {}).get("prediction"),
-        }
+        llm_patient_data: dict[str, Any] = dict(patient_data or {})
+        if not llm_patient_data and isinstance(questionnaire_data, dict):
+            q_patient = questionnaire_data.get("patient_data")
+            if isinstance(q_patient, dict):
+                llm_patient_data = q_patient
+
+        ml_summary = _build_educator_ml_summary(payload)
         gemini_resolved, gemini_key_source = _resolve_educator_gemini_key(gemini_api_key)
         _educator_models = (
             _gemini_educator_models_to_try(gemini_resolved) if gemini_resolved else []
@@ -2321,7 +2672,7 @@ async def _analyze_internal(
         llm_result = await asyncio.to_thread(
             _generate_llm_summary,
             ml_summary,
-            patient_data or {},
+            llm_patient_data,
             gemini_resolved,
         )
         payload["llm_evaluation"] = llm_result
@@ -2358,6 +2709,8 @@ async def _startup_load_models() -> None:
     _load_copd_pipeline()
     _load_densenet121()
     _load_swint_model4()
+    _load_densenet_model5()
+    logger.info("Resolved MODEL5_DENSENET_LABELS order: %s", MODEL5_DENSENET_LABELS)
     missing = _missing_enabled_model_files()
     if missing:
         for msg in missing:
@@ -2415,6 +2768,13 @@ async def health() -> dict[str, Any]:
                 "error": MODEL4_SWINT_LOAD_ERROR,
                 "labels": list(MODEL4_SWINT_LABELS),
             },
+            "model5_densenet_h5": {
+                "enabled": ENABLE_MODEL5_DENSENET,
+                "loaded": MODEL5_DENSENET_H5 is not None,
+                **_model5_densenet_path_diagnostics(),
+                "error": MODEL5_DENSENET_LOAD_ERROR,
+                "labels": list(MODEL5_DENSENET_LABELS),
+            },
         },
     }
 
@@ -2431,8 +2791,10 @@ async def debug_model_status() -> dict[str, Any]:
     m2_ready = ENABLE_MODEL2_H5 and MODEL2_H5 is not None
     m3_ready = ENABLE_DENSENET121 and MODEL_DENSENET121 is not None
     m4_ready = ENABLE_MODEL4_SWINT and MODEL4_SWINT is not None
+    m5_ready = ENABLE_MODEL5_DENSENET and MODEL5_DENSENET_H5 is not None
     m4_diag = _model4_swint_path_diagnostics()
-    hybrid_preview = m1_ready or m2_ready or m3_ready or m4_ready
+    m5_diag = _model5_densenet_path_diagnostics()
+    hybrid_preview = m1_ready or m2_ready or m3_ready or m4_ready or m5_ready
     return {
         "model_registry": MODEL_REGISTRY,
         "model1_pt": {
@@ -2464,6 +2826,13 @@ async def debug_model_status() -> dict[str, Any]:
             "load_error": MODEL4_SWINT_LOAD_ERROR,
             **m4_diag,
             "labels": list(MODEL4_SWINT_LABELS),
+        },
+        "model5_densenet_h5": {
+            "enabled": ENABLE_MODEL5_DENSENET,
+            "loaded": MODEL5_DENSENET_H5 is not None,
+            "load_error": MODEL5_DENSENET_LOAD_ERROR,
+            **m5_diag,
+            "labels": list(MODEL5_DENSENET_LABELS),
         },
         "tensorflow_version": tf_ver,
         "pytorch_version": pt_ver,
