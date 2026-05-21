@@ -48,25 +48,234 @@ class PatientData(BaseModel):
 
 class QuestionRequest(BaseModel):
     high_attention_findings: List[str]
+    gemini_api_key: str | None = None
+    locale: str | None = None
+    scan_summary: str | None = None
 
 
-class QuestionItem(BaseModel):
+class EducationalInsightItem(BaseModel):
     id: str
+    title: str
     text: str
     finding_trigger: str
+    category: str = "overview"
 
 
-CLINICAL_DICTIONARY: dict[str, list[str]] = {
-    "Pneumonia": [
-        "The AI flagged a pattern similar to pneumonia. Based on my symptoms, what follow-up tests or visits do you recommend?",
-        "Should I be concerned about this viral pattern, and does it require immediate treatment?",
-    ],
-    "Infiltration": [
-        "The educational output weighted Infiltration. How does that line up with your clinical impression?",
-    ],
-    "Pleural_Thickening": [
-        "I noticed the AI highlighted areas associated with Pleural thickening—could you explain what that region shows on my film?",
-    ],
+def _normalize_insight_finding_key(finding: str) -> str:
+    raw = finding.strip()
+    if not raw:
+        return raw
+    aliases = {
+        "Infiltration": "Lung Opacity",
+        "Lung_Opacity": "Lung Opacity",
+        "COVID_19": "COVID-19",
+    }
+    return aliases.get(raw, raw)
+
+
+def _resolve_insights_fallback_locale(locale: str | None) -> str:
+    loc = (locale or "en").strip()
+    if loc in ("zh-Hant", "zh-TW", "zh-HK"):
+        return "zh-Hant"
+    if loc in ("zh-Hans", "zh-CN", "zh"):
+        return "zh-Hans"
+    return "en"
+
+
+EDUCATIONAL_INSIGHTS_FALLBACK_BY_LOCALE: dict[str, dict[str, list[dict[str, str]]]] = {
+    "en": {
+        "Pneumonia": [
+            {
+                "title": "What this pattern may indicate",
+                "text": (
+                    "Pneumonia on chest X-ray often shows areas where air spaces look filled or inflamed. "
+                    "Your clinician combines imaging with symptoms, exams, and sometimes blood tests or cultures—not AI scores alone."
+                ),
+                "category": "overview",
+            },
+            {
+                "title": "Treatment and follow-up (general)",
+                "text": (
+                    "Care may include antibiotics for suspected bacterial infection, rest and fluids, oxygen if needed, "
+                    "and repeat imaging when symptoms persist. Vaccines (influenza, pneumococcal, COVID-19 where appropriate) "
+                    "help prevent some pneumonias."
+                ),
+                "category": "treatment",
+            },
+        ],
+        "Lung Opacity": [
+            {
+                "title": "Understanding lung opacity",
+                "text": (
+                    "Opacity means part of the lung looks denser or hazier than normal. Causes range from infection and fluid "
+                    "to inflammation or scarring; radiology wording and your symptoms guide next steps."
+                ),
+                "category": "overview",
+            },
+            {
+                "title": "Typical management themes",
+                "text": (
+                    "Doctors may order follow-up X-rays, CT, or labs depending on context. Treatment targets the underlying "
+                    "cause—only your care team should decide what applies to you."
+                ),
+                "category": "treatment",
+            },
+        ],
+        "COVID-19": [
+            {
+                "title": "Imaging and COVID-19",
+                "text": (
+                    "AI may flag patterns seen with viral pneumonia, including COVID-19. Imaging supports assessment "
+                    "but does not replace PCR/antigen testing or clinical diagnosis."
+                ),
+                "category": "overview",
+            },
+            {
+                "title": "Care and prevention context",
+                "text": (
+                    "Management ranges from home monitoring to antivirals in eligible high-risk patients and hospital care "
+                    "when severe. Check official health-authority guidance on vaccines and variants with your clinician."
+                ),
+                "category": "treatment",
+            },
+        ],
+        "Pleural_Thickening": [
+            {
+                "title": "Pleural thickening on X-ray",
+                "text": (
+                    "Thickening along the lung lining can reflect prior inflammation, asbestos exposure, or other causes. "
+                    "Many cases are chronic and stable; new or worsening thickening may warrant CT and specialist review."
+                ),
+                "category": "overview",
+            },
+        ],
+    },
+    "zh-Hant": {
+        "Pneumonia": [
+            {
+                "title": "影像可能代表什麼",
+                "text": (
+                    "胸肺 X 光上的肺炎常見表現是肺泡區域較實或發炎。醫師會結合症狀、理學檢查，"
+                    "有時加上血液或培養檢查，而不只依賴 AI 分數。"
+                ),
+                "category": "overview",
+            },
+            {
+                "title": "治療與跟進（一般說明）",
+                "text": (
+                    "視病因而定，可能包括抗生素、休息與補充水分、需要時的氧氣治療，以及症狀持續時的覆照影像。"
+                    "流感、肺炎鏈球菌、COVID-19 等疫苗有助降低部分肺炎風險。"
+                ),
+                "category": "treatment",
+            },
+        ],
+        "Lung Opacity": [
+            {
+                "title": "肺野不透明度的意義",
+                "text": (
+                    "表示肺部部分區域在 X 光上較濃或較霧，可能與感染、積液、發炎或疤痕等有關，"
+                    "需配合放射科報告與臨床情況判斷。"
+                ),
+                "category": "overview",
+            },
+            {
+                "title": "常見處理方向",
+                "text": "醫師可能安排覆照、電腦掃描或化驗；治療針對真正病因，請以你的主診醫師計劃為準。",
+                "category": "treatment",
+            },
+        ],
+        "COVID-19": [
+            {
+                "title": "與 COVID-19 相關的影像表現",
+                "text": (
+                    "AI 可能標示與病毒性肺炎（包括 COVID-19）相關的模式。"
+                    "影像有助評估，但不能取代 PCR/抗原檢測或臨床診斷。"
+                ),
+                "category": "overview",
+            },
+            {
+                "title": "照護與預防背景",
+                "text": (
+                    "由居家監測到高風險族群的抗病毒治療，以及需要時的住院支援。"
+                    "疫苗與公共衛生建議會更新，請向醫護人員及官方來源查證。"
+                ),
+                "category": "treatment",
+            },
+        ],
+        "Pleural_Thickening": [
+            {
+                "title": "肋膜增厚",
+                "text": (
+                    "肺膜沿線增厚可能與既往發炎、石棉暴露等有關；許多情況屬慢性且穩定，"
+                    "若為新出現或惡化，醫師可能安排 CT 或專科評估。"
+                ),
+                "category": "overview",
+            },
+        ],
+    },
+    "zh-Hans": {
+        "Pneumonia": [
+            {
+                "title": "影像可能代表什么",
+                "text": (
+                    "胸片上的肺炎常表现为肺泡区域较实或发炎。医生会结合症状、查体，"
+                    "有时加上血液或培养检查，而不只依赖 AI 分数。"
+                ),
+                "category": "overview",
+            },
+            {
+                "title": "治疗与随访（一般说明）",
+                "text": (
+                    "视病因而定，可能包括抗生素、休息与补液、需要时的氧疗，以及症状持续时的复查影像。"
+                    "流感、肺炎球菌、COVID-19 等疫苗有助于降低部分肺炎风险。"
+                ),
+                "category": "treatment",
+            },
+        ],
+        "Lung Opacity": [
+            {
+                "title": "肺野不透明度的意义",
+                "text": (
+                    "表示肺部部分区域在 X 光上较浓或较雾，可能与感染、积液、炎症或瘢痕等有关，"
+                    "需结合放射科报告与临床情况判断。"
+                ),
+                "category": "overview",
+            },
+            {
+                "title": "常见处理方向",
+                "text": "医生可能安排复查、CT 或化验；治疗针对真正病因，请以你的主治医生方案为准。",
+                "category": "treatment",
+            },
+        ],
+        "COVID-19": [
+            {
+                "title": "与 COVID-19 相关的影像表现",
+                "text": (
+                    "AI 可能标示与病毒性肺炎（包括 COVID-19）相关的模式。"
+                    "影像有助于评估，但不能取代 PCR/抗原检测或临床诊断。"
+                ),
+                "category": "overview",
+            },
+            {
+                "title": "照护与预防背景",
+                "text": (
+                    "从居家监测到高风险人群的抗病毒治疗，以及需要时的住院支持。"
+                    "疫苗与公共卫生建议会更新，请向医护人员及官方来源查证。"
+                ),
+                "category": "treatment",
+            },
+        ],
+        "Pleural_Thickening": [
+            {
+                "title": "胸膜增厚",
+                "text": (
+                    "肺膜沿线增厚可能与既往炎症、石棉暴露等有关；许多情况属慢性且稳定，"
+                    "若为新出现或恶化，医生可能安排 CT 或专科评估。"
+                ),
+                "category": "overview",
+            },
+        ],
+    },
 }
 
 
@@ -2007,9 +2216,11 @@ def _generate_llm_summary(
 
     patient_profile = _format_patient_profile_for_educator(patient_data)
     prompt = f"""
-You are a highly empathetic, professional medical AI educator.
-Your goal is to explain Chest X-ray AI findings to a patient based on their symptoms.
-CRITICAL RULE: You must NEVER definitively diagnose. Always use language like "The AI detected patterns consistent with..." and advise consulting a doctor.
+You are a highly empathetic, professional medical AI educator for a medical education platform.
+Your goal is to explain chest X-ray AI findings in clear, academically rigorous language suitable for informed patients and learners.
+You must NEVER definitively diagnose. Use phrasing such as "The AI detected patterns consistent with..." and note that only a licensed clinician can interpret imaging in full clinical context.
+
+CRITICAL: You are an educational tool, not a doctor. All strategies and developments must be framed as "standard medical practice" or "general clinical knowledge." Never use prescriptive language like "You should do X" or "Your best strategy is Y." Always speak objectively about the condition itself—not direct instructions to this patient.
 
 Patient Profile (clinical intake questionnaire):
 {patient_profile}
@@ -2017,15 +2228,19 @@ Patient Profile (clinical intake questionnaire):
 AI Findings (five vision models + COPD screening):
 {ml_results}
 
-Respond in exactly three sections using Markdown:
+Respond in exactly two sections using Markdown (no other sections):
+
 ### 🩺 Clinical Observation
-(2-3 sentences combining their symptoms with the AI findings for a layman.)
+Write 2-3 sentences combining questionnaire symptoms with the AI findings for a lay reader. Educational tone only; no diagnosis.
 
-### 📋 Suggested Next Steps
-(3 actionable, bulleted next steps based on severity and questionnaire answers.)
+### 💡 Clinical Context & Management Strategy
+Write exactly three paragraphs (plain prose, not bullet lists). Personalize using the questionnaire data above and the most prominent condition flagged by the vision models:
 
-### ❓ Questions to Ask Your Doctor
-(2-3 specific bullet questions tailored to their symptoms, smoking history, and AI findings.)
+**Latest Developments:** A brief, factual summary of modern medical understanding or recent advancements regarding that prominent condition (e.g., standard approaches to viral pneumonia, lung opacities, or other relevant patterns). Frame as general clinical knowledge—not live breaking news unless widely established.
+
+**Standard Strategy:** Explain the typical clinical pathway or standard investigative procedures clinicians usually follow when presented with these X-ray patterns together with the questionnaire symptoms. Describe what is commonly done in practice; do not tell the reader what they personally must do.
+
+**Key Concerns & Limitations:** Highlight specific risk factors and monitoring themes clinicians typically weigh in these scenarios, dynamically referencing the patient's age, symptom duration, smoking history, and breathing difficulty from the questionnaire where relevant. Emphasize limits of AI screening and the need for professional interpretation.
 """
     models_to_try = _gemini_educator_models_to_try(api_key)
     last_error: BaseException | None = None
@@ -2122,6 +2337,165 @@ Respond in exactly three sections using Markdown:
             "text": "Could not generate clinical summary.",
             "error_code": code,
         }
+
+
+def _resolve_gemini_key_json(value: str | None) -> tuple[str | None, str]:
+    if value is not None and str(value).strip():
+        return str(value).strip(), "json_gemini_api_key"
+    for env_name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        v = os.getenv(env_name, "").strip()
+        if v:
+            return v, f"env_{env_name.lower()}"
+    return None, "none"
+
+
+def _locale_instruction(locale: str | None) -> str:
+    loc = (locale or "en").strip()
+    if loc in ("zh-Hant", "zh-TW", "zh-HK"):
+        return "Write all titles and text in Traditional Chinese (繁體中文)."
+    if loc in ("zh-Hans", "zh-CN", "zh"):
+        return "Write all titles and text in Simplified Chinese (简体中文)."
+    return "Write all titles and text in English."
+
+
+def _parse_educational_insights_json(raw: str) -> list[dict[str, str]] | None:
+    text = raw.strip()
+    if text.startswith("```"):
+        lines = text.split("\n")
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, list):
+        return None
+    out: list[dict[str, str]] = []
+    for i, item in enumerate(parsed):
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        body = str(item.get("text") or item.get("body") or "").strip()
+        trigger = str(item.get("finding_trigger") or item.get("finding") or "General").strip()
+        category = str(item.get("category") or "overview").strip() or "overview"
+        if not body:
+            continue
+        if not title:
+            title = "Educational insight"
+        out.append(
+            {
+                "id": str(item.get("id") or f"i{i + 1}"),
+                "title": title,
+                "text": body,
+                "finding_trigger": trigger,
+                "category": category,
+            }
+        )
+    return out if out else None
+
+
+def _fallback_educational_insights(
+    findings: list[str], locale: str | None = None
+) -> list[dict[str, str]]:
+    pack = EDUCATIONAL_INSIGHTS_FALLBACK_BY_LOCALE[_resolve_insights_fallback_locale(locale)]
+    rows: list[dict[str, str]] = []
+    idx = 1
+    seen: set[str] = set()
+    for finding in findings:
+        key = _normalize_insight_finding_key(finding)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        templates = pack.get(key)
+        if not templates:
+            continue
+        for tpl in templates:
+            rows.append(
+                {
+                    "id": f"i{idx}",
+                    "title": tpl["title"],
+                    "text": tpl["text"],
+                    "finding_trigger": key,
+                    "category": tpl.get("category", "overview"),
+                }
+            )
+            idx += 1
+    return rows
+
+
+def _generate_educational_insights_llm(
+    findings: list[str],
+    api_key: str,
+    locale: str | None,
+    scan_summary: str | None,
+) -> dict[str, Any]:
+    normalized = [_normalize_insight_finding_key(f) for f in findings]
+    normalized = [f for f in normalized if f]
+    locale_line = _locale_instruction(locale)
+    summary_block = (
+        f"\nScan / model context (educational only):\n{scan_summary}\n"
+        if scan_summary and scan_summary.strip()
+        else ""
+    )
+    prompt = f"""
+You are a medical health educator helping a patient understand their chest X-ray AI screening output.
+{locale_line}
+
+CRITICAL RULES:
+- Do NOT diagnose. Use phrasing like "patterns consistent with" or "areas sometimes associated with".
+- Do NOT prescribe. Describe general treatment approaches and public-health context only.
+- For "latest news": summarize widely accepted clinical themes and guideline directions (vaccines, antibiotics, antivirals, follow-up imaging). State clearly this is general background—not a live news feed—and advise consulting their clinician for personal care.
+- Never claim real-time access to breaking news unless you are certain.
+
+High-attention AI finding labels from this scan:
+{json.dumps(normalized)}
+{summary_block}
+
+Return ONLY a JSON array (no markdown prose outside the array) with 3 to 6 objects. Each object must have:
+- "id": string (e.g. "i1")
+- "title": short heading
+- "text": 2-4 sentences of patient-friendly educational information (treatment options, follow-up tests, or research/guideline context tied to the findings)
+- "finding_trigger": one of the finding labels above, or "General"
+- "category": one of "overview", "treatment", "research"
+
+Cover at least: (1) what the finding means on X-ray, (2) typical treatment/management themes, (3) recent evidence or guideline themes where relevant.
+"""
+    models_to_try = _gemini_educator_models_to_try(api_key)
+    if not models_to_try:
+        return {"status": "failed", "insights": None, "error_code": "gemini_not_found"}
+
+    last_code: str | None = None
+    try:
+        genai.configure(api_key=api_key)
+        for model_name in models_to_try:
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(prompt)
+                try:
+                    raw = response.text
+                except (ValueError, AttributeError):
+                    last_code = "gemini_blocked_or_empty"
+                    continue
+                text = (raw or "").strip() if isinstance(raw, str) else ""
+                if not text:
+                    last_code = "gemini_blocked_or_empty"
+                    continue
+                parsed = _parse_educational_insights_json(text)
+                if parsed:
+                    return {"status": "success", "insights": parsed, "model": model_name}
+                last_code = "gemini_invalid_json"
+            except Exception as exc:
+                last_code = _classify_gemini_exception(exc)
+                if not _gemini_error_should_try_next_model(last_code):
+                    break
+                continue
+    except Exception as exc:
+        last_code = _classify_gemini_exception(exc)
+
+    return {"status": "failed", "insights": None, "error_code": last_code or "gemini_unknown"}
 
 
 def _error_response(message: str, status_code: int) -> JSONResponse:
@@ -3212,27 +3586,38 @@ async def generate_questions(
     req: QuestionRequest,
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> JSONResponse:
-    """Return suggested doctor questions for high-attention finding labels (educational)."""
+    """Return AI educational insights (treatment/research context) for high-attention findings."""
     auth_error = _validate_api_key(x_api_key)
     if auth_error is not None:
         return auth_error
-    suggested_questions: list[dict[str, str]] = []
-    q_index = 1
-    for finding in req.high_attention_findings:
-        dict_key = finding.replace(" ", "_")
-        if dict_key in CLINICAL_DICTIONARY:
-            for q_text in CLINICAL_DICTIONARY[dict_key]:
-                suggested_questions.append(
-                    {
-                        "id": f"q{q_index}",
-                        "text": q_text,
-                        "finding_trigger": finding,
-                    }
-                )
-                q_index += 1
+
+    findings = req.high_attention_findings or []
+    gemini_key, _key_src = _resolve_gemini_key_json(req.gemini_api_key)
+    source = "rules"
+    educational_insights: list[dict[str, str]] = []
+
+    if gemini_key and findings:
+        llm_result = await asyncio.to_thread(
+            _generate_educational_insights_llm,
+            findings,
+            gemini_key,
+            req.locale,
+            req.scan_summary,
+        )
+        if llm_result.get("status") == "success" and llm_result.get("insights"):
+            educational_insights = llm_result["insights"]
+            source = "llm"
+
+    if not educational_insights:
+        educational_insights = _fallback_educational_insights(findings, req.locale)
+
     return JSONResponse(
         status_code=200,
-        content={"status": "success", "suggested_questions": suggested_questions},
+        content={
+            "status": "success",
+            "source": source,
+            "educational_insights": educational_insights,
+        },
     )
 
 

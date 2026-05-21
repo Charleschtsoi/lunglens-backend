@@ -75,7 +75,7 @@ Commercial inquiries: **enterprise@lunglens.com**.
 - Reference contract: [`sample_response.json`](sample_response.json) (successful demo-normal baseline)
 - `POST /pipeline/analyze` -> alias of analyze endpoint
 - `POST /predict/densenet` -> standalone DenseNet inference + Grad-CAM
-- `POST /api/v1/generate-questions` -> question generation helper
+- `POST /api/v1/generate-questions` -> Gemini (or rule fallback) educational insights for scan findings
 
 ## 1) Local setup
 
