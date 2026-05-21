@@ -237,15 +237,20 @@ MODEL6_VISION_H5_PATH = (
     or os.getenv("H5_MODEL2_PATH")
     or os.getenv("H5_MODEL_PATH", "models/resnet152v2_lung_disease_final.h5")
 ).strip()
+# Edward ResNet-152V2 (legacy H5_MODEL2 / model6_vision_h5): 3 classes, index order per Edward's training.
+# Keras ImageDataGenerator alphabetical order would be Lung_Opacity, Normal, Viral_Pneumonia — confirm with Edward.
+H5_MODEL2_LABELS: tuple[str, ...] = ("Normal", "Viral_Pneumonia", "Lung_Opacity")
 MODEL6_VISION_LABELS = [
     lbl.replace("_", " ")
     for lbl in _parse_csv(
         os.getenv(
             "MODEL6_VISION_LABELS",
-            os.getenv("H5_MODEL2_LABELS", "Normal,Lung_Opacity,Viral_Pneumonia"),
+            os.getenv("H5_MODEL2_LABELS", ",".join(H5_MODEL2_LABELS)),
         )
     )
 ]
+# resnet_v2 = Keras ResNetV2 ImageNet scaling; scale_01 = divide by 255 only ([0, 1]).
+MODEL6_PREPROCESS_MODE = os.getenv("MODEL6_PREPROCESS_MODE", "resnet_v2").strip().lower()
 # Prefer ENABLE_MODEL1; legacy ENABLE_MODEL1_PYTORCH honored if the new key is unset.
 if os.getenv("ENABLE_MODEL1") is not None:
     ENABLE_MODEL1 = _parse_bool_env("ENABLE_MODEL1", default=False)
@@ -1328,23 +1333,34 @@ def _load_model6_vision_h5() -> None:
 
 
 def _preprocess_model6_vision_h5_numpy(image_bytes: bytes) -> Any:
-    """Model 6 legacy ResNet-152V2: RGB 224×224 + ResNetV2 preprocess_input."""
+    """Model 6 legacy ResNet-152V2: RGB 224×224; scale per MODEL6_PREPROCESS_MODE."""
     import numpy as np  # type: ignore
 
     w, h = MODEL6_VISION_H5_IMAGE_SIZE
     image = Image.open(BytesIO(image_bytes)).convert("RGB")
     image = image.resize((w, h), Image.Resampling.BILINEAR)
     img_array = np.asarray(image, dtype=np.float32)
-    try:
-        from tensorflow.keras.applications.resnet_v2 import preprocess_input  # type: ignore
-
-        img_array = preprocess_input(img_array)
-    except Exception:
-        logger.warning(
-            "ResNetV2 preprocess_input unavailable for Model 6; falling back to /255.0."
-        )
+    if MODEL6_PREPROCESS_MODE == "scale_01":
         img_array = img_array / 255.0
+    else:
+        try:
+            from tensorflow.keras.applications.resnet_v2 import preprocess_input  # type: ignore
+
+            img_array = preprocess_input(img_array)
+        except Exception:
+            logger.warning(
+                "ResNetV2 preprocess_input unavailable for Model 6; falling back to /255.0."
+            )
+            img_array = img_array / 255.0
     return np.expand_dims(img_array, axis=0)
+
+
+def _model6_vision_label_index_map() -> list[dict[str, Any]]:
+    """Indexed labels for /health and /debug (Edward verification)."""
+    return [
+        {"index": i, "label": _label_for_api(MODEL6_VISION_LABELS[i])}
+        for i in range(len(MODEL6_VISION_LABELS))
+    ]
 
 
 def _label_for_api(raw: str) -> str:
@@ -1354,28 +1370,114 @@ def _label_for_api(raw: str) -> str:
 def _model6_vision_decode_scores(row: Any) -> tuple[int, str, float, dict[str, float]]:
     import numpy as np  # type: ignore
 
-    idx = int(np.argmax(row))
+    scores = np.asarray(row, dtype=np.float64).flatten()
+    n_labels = len(MODEL6_VISION_LABELS)
+    if scores.size < n_labels:
+        raise ValueError(
+            f"Model 6 H5 returned {scores.size} logits; expected {n_labels} "
+            f"for labels {MODEL6_VISION_LABELS!r}."
+        )
+    if scores.size > n_labels:
+        logger.warning(
+            "Model 6 H5 returned %s logits; using first %s with labels %r.",
+            scores.size,
+            n_labels,
+            MODEL6_VISION_LABELS,
+        )
+        scores = scores[:n_labels]
+    idx = int(np.argmax(scores))
     raw_label = MODEL6_VISION_LABELS[idx]
     label = _label_for_api(raw_label)
-    confidence = float(np.asarray(row[idx], dtype=np.float64))
+    confidence = float(scores[idx])
     probabilities = {
-        _label_for_api(MODEL6_VISION_LABELS[i]): round(
-            float(np.asarray(row[i], dtype=np.float64)), 4
-        )
-        for i in range(len(MODEL6_VISION_LABELS))
+        _label_for_api(MODEL6_VISION_LABELS[i]): round(float(scores[i]), 4)
+        for i in range(n_labels)
     }
     return idx, label, confidence, probabilities
 
 
-def _run_model6_vision_h5(image_bytes: bytes) -> tuple[str, float, dict[str, float]]:
+def _find_model6_gradcam_layer(model: Any) -> Any:
+    """Last conv block for ResNet152V2-style Keras models (post-ReLU target)."""
+    import tensorflow as tf  # type: ignore
+
+    for name in ("post_relu", "conv5_block3_out", "conv5_block3_3_conv"):
+        try:
+            return model.get_layer(name)
+        except ValueError:
+            continue
+    for layer in reversed(model.layers):
+        if isinstance(layer, tf.keras.layers.Conv2D):
+            return layer
+    raise ValueError("No suitable Conv2D layer found for Model 6 Grad-CAM.")
+
+
+def _keras_gradcam_model6_to_png_base64(
+    model: Any,
+    batch: Any,
+    class_idx: int,
+    rgb_hwc_01: Any,
+) -> str | None:
+    """TensorFlow Grad-CAM overlay for Model 6 ResNet-152V2 H5."""
+    import numpy as np  # type: ignore
+    import tensorflow as tf  # type: ignore
+
+    try:
+        target_layer = _find_model6_gradcam_layer(model)
+        grad_model = tf.keras.models.Model(
+            [model.inputs[0]],
+            [target_layer.output, model.output],
+        )
+        with tf.GradientTape() as tape:
+            conv_out, predictions = grad_model(batch, training=False)
+            loss = predictions[:, class_idx]
+        grads = tape.gradient(loss, conv_out)
+        if grads is None:
+            return None
+        pooled_grads = tf.reduce_mean(grads, axis=(0, 1))
+        conv_out = conv_out[0]
+        heatmap = tf.reduce_sum(tf.multiply(pooled_grads, conv_out), axis=-1)
+        heatmap = tf.maximum(heatmap, 0) / (tf.reduce_max(heatmap) + 1e-8)
+        heatmap_np = heatmap.numpy()
+        heatmap_resized = np.uint8(255 * heatmap_np)
+        heatmap_img = Image.fromarray(heatmap_resized).resize(
+            (rgb_hwc_01.shape[1], rgb_hwc_01.shape[0]),
+            Image.Resampling.BILINEAR,
+        )
+        heatmap_arr = np.asarray(heatmap_img, dtype=np.float32) / 255.0
+        heatmap_rgb = np.stack([heatmap_arr, heatmap_arr, heatmap_arr], axis=-1)
+        overlay = np.clip(heatmap_rgb * 0.4 + rgb_hwc_01 * 0.6, 0, 1)
+        out_img = Image.fromarray((overlay * 255).astype(np.uint8))
+        buf = BytesIO()
+        out_img.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception as exc:
+        logger.warning("Model 6 Grad-CAM failed: %s", exc)
+        return None
+
+
+def _run_model6_vision_h5(image_bytes: bytes) -> dict[str, Any]:
     if MODEL6_VISION_H5 is None:
         raise RuntimeError(
             MODEL6_VISION_H5_LOAD_ERROR or "Model 6 legacy vision H5 is not loaded."
         )
+    import numpy as np  # type: ignore
+
+    w, h = MODEL6_VISION_H5_IMAGE_SIZE
+    image = Image.open(BytesIO(image_bytes)).convert("RGB")
+    image = image.resize((w, h), Image.Resampling.BILINEAR)
+    rgb_01 = np.asarray(image, dtype=np.float32) / 255.0
     batch = _preprocess_model6_vision_h5_numpy(image_bytes)
     out = MODEL6_VISION_H5.predict(batch, verbose=0)
-    _, label, confidence, probabilities = _model6_vision_decode_scores(out[0])
-    return label, confidence, probabilities
+    idx, label, confidence, probabilities = _model6_vision_decode_scores(out[0])
+    gradcam_b64 = _keras_gradcam_model6_to_png_base64(
+        MODEL6_VISION_H5, batch, idx, rgb_01
+    )
+    return {
+        "prediction": label,
+        "confidence": round(float(confidence), 3),
+        "probabilities": probabilities,
+        "gradcam": gradcam_b64 or "",
+    }
 
 
 def _model2_tabular_probabilities(prediction_prob: float) -> dict[str, float]:
@@ -2473,6 +2575,21 @@ def _build_demo_normal_payload(
         },
         "model_name": "Model 5 (DenseNet-121)",
     }
+    # Edward ResNet-152V2 (API model6_vision_h5): 3-class demo aligned with H5_MODEL2_LABELS order.
+    demo_m6_probs = {
+        _label_for_api(H5_MODEL2_LABELS[0]): 0.97,
+        _label_for_api(H5_MODEL2_LABELS[1]): 0.02,
+        _label_for_api(H5_MODEL2_LABELS[2]): 0.01,
+    }
+    payload["model6_vision_h5"] = {
+        "prediction": "Normal",
+        "confidence": 0.97,
+        "status": "success",
+        "probabilities": demo_m6_probs,
+        "gradcam": "",
+        "model_name": "ResNet-152V2 (Edward)",
+        "input_type": "vision",
+    }
     return payload
 
 
@@ -2579,8 +2696,12 @@ async def _analyze_internal(
                 "prediction": "N/A",
                 "confidence": 0.0,
                 "status": "failed",
-                "model_name": "ResNet-152V2 (legacy)",
+                "model_name": "ResNet-152V2 (Edward)",
+                "input_type": "vision",
             }
+            model6_vision_inference_ok = False
+            model6_vision_label = "Normal"
+            model6_vision_conf = 0.0
 
             model4_swint_result: dict[str, Any] = {
                 "prediction": "N/A",
@@ -2634,16 +2755,19 @@ async def _analyze_internal(
 
             if "model6" in vision_results:
                 m6_data, _m6_ms, m6_err = vision_results["model6"]
-                if m6_err is None and m6_data is not None:
-                    m6_label, m6_conf, m6_probs = m6_data
+                if m6_err is None and isinstance(m6_data, dict):
+                    model6_vision_label = str(m6_data.get("prediction", "Normal"))
+                    model6_vision_conf = round(float(m6_data.get("confidence", 0.0)), 3)
                     model6_vision_result = {
-                        "prediction": m6_label,
-                        "confidence": round(float(m6_conf), 3),
+                        "prediction": model6_vision_label,
+                        "confidence": model6_vision_conf,
                         "status": "success",
-                        "probabilities": m6_probs,
-                        "model_name": "ResNet-152V2 (legacy)",
+                        "probabilities": m6_data.get("probabilities") or {},
+                        "gradcam": m6_data.get("gradcam") or "",
+                        "model_name": "ResNet-152V2 (Edward)",
                         "input_type": "vision",
                     }
+                    model6_vision_inference_ok = True
                 else:
                     logger.warning("Model 6 legacy vision inference failed: %s", m6_err)
 
@@ -2695,6 +2819,15 @@ async def _analyze_internal(
             if model1_pytorch_inference_ok and m1_label != "Normal":
                 base = "Pneumonia" if "Pneumonia" in m1_label else m1_label
                 predictions[base] = max(predictions.get(base, 0.0), m1_conf_r)
+            if model6_vision_inference_ok and model6_vision_label != "Normal":
+                m6_base = (
+                    "Pneumonia"
+                    if "Pneumonia" in model6_vision_label
+                    else model6_vision_label
+                )
+                predictions[m6_base] = max(
+                    predictions.get(m6_base, 0.0), model6_vision_conf
+                )
             if model4_swint_inference_ok and model4_swint_label != "Normal":
                 m4_base = (
                     "Pneumonia"
@@ -2838,6 +2971,10 @@ async def health() -> dict[str, Any]:
                 **_model6_vision_h5_path_diagnostics(),
                 "error": MODEL6_VISION_H5_LOAD_ERROR,
                 "labels": list(MODEL6_VISION_LABELS),
+                "label_indices": _model6_vision_label_index_map(),
+                "h5_model2_labels_default": list(H5_MODEL2_LABELS),
+                "preprocess_mode": MODEL6_PREPROCESS_MODE,
+                "image_size": list(MODEL6_VISION_H5_IMAGE_SIZE),
             },
             "densenet121_pt": {
                 "enabled": ENABLE_DENSENET121,
@@ -2907,6 +3044,11 @@ async def debug_model_status() -> dict[str, Any]:
             "load_error": MODEL6_VISION_H5_LOAD_ERROR,
             **_model6_vision_h5_path_diagnostics(),
             "labels": list(MODEL6_VISION_LABELS),
+            "label_indices": _model6_vision_label_index_map(),
+            "h5_model2_labels_default": list(H5_MODEL2_LABELS),
+            "preprocess_mode": MODEL6_PREPROCESS_MODE,
+            "image_size": list(MODEL6_VISION_H5_IMAGE_SIZE),
+            "gradcam": "keras_gradient_tape",
         },
         "densenet121_pt": {
             "enabled": ENABLE_DENSENET121,

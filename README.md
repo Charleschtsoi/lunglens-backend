@@ -121,9 +121,15 @@ ENABLE_MODEL1=true
 MODEL1_PATH=models/best_resnet50_lunglens_cleaner.pth
 MODEL1_LABELS=Normal,Pneumonia-Bacteria,Pneumonia-Virus
 
-ENABLE_MODEL2_H5=true
-H5_MODEL2_PATH=/absolute/path/to/resnet152v2_lung_disease_final.h5
-H5_MODEL2_LABELS=Normal,Lung_Opacity,Viral_Pneumonia
+ENABLE_MODEL2_TABULAR=true
+MODEL2_TABULAR_PATH=models/copd_screening_model.h5
+MODEL2_SCALER_PATH=models/scaler.pkl
+
+# Edward ResNet-152V2 X-ray (API field model6_vision_h5; legacy ENABLE_MODEL2_H5 / H5_MODEL2_*)
+ENABLE_MODEL6_VISION_H5=true
+MODEL6_VISION_H5_PATH=/absolute/path/to/resnet152v2_lung_disease_final.h5
+H5_MODEL2_LABELS=Normal,Viral_Pneumonia,Lung_Opacity
+# MODEL6_PREPROCESS_MODE=resnet_v2
 
 ENABLE_DENSENET121=true
 DENSENET121_PATH=models/best_densenet121_lunglens.pth
