@@ -35,7 +35,7 @@ if not logging.getLogger().handlers:
     )
 
 # ML Model 6 (legacy ResNet-152V2 vision H5): optional; was formerly the Model 2 X-ray slot.
-MODEL6_VISION_H5_IMAGE_SIZE: tuple[int, int] = (224, 224)
+MODEL2_VISION_H5_IMAGE_SIZE: tuple[int, int] = (224, 224)
 
 
 class PatientData(BaseModel):
@@ -208,49 +208,59 @@ def _gemini_error_should_try_next_model(error_code: str) -> bool:
 FAIL_STARTUP_ON_MISSING_ENABLED_MODELS = _parse_bool_env(
     "FAIL_STARTUP_ON_MISSING_ENABLED_MODELS", default=False
 )
-# ML Model 2 — tabular clinical screening (questionnaire → scaler.pkl → Keras H5).
-MODEL2_TABULAR_PATH = (
-    os.getenv("MODEL2_TABULAR_PATH")
-    or os.getenv("COPD_MODEL_PATH", "models/copd_screening_model.h5")
-).strip()
-MODEL2_SCALER_PATH = (
-    os.getenv("MODEL2_SCALER_PATH")
-    or os.getenv("COPD_SCALER_PATH", "models/scaler.pkl")
-).strip()
-if os.getenv("ENABLE_MODEL2_TABULAR") is not None:
-    ENABLE_MODEL2_TABULAR = _parse_bool_env("ENABLE_MODEL2_TABULAR", default=True)
-elif os.getenv("ENABLE_COPD_MODEL") is not None:
-    ENABLE_MODEL2_TABULAR = os.getenv("ENABLE_COPD_MODEL", "true").lower() == "true"
-else:
-    ENABLE_MODEL2_TABULAR = True
-MODEL2_TABULAR_LABELS = ("Low COPD Risk", "High COPD Risk")
-
-# ML Model 6 — legacy ResNet-152V2 vision H5 (off by default; former Model 2 X-ray weights).
-if os.getenv("ENABLE_MODEL6_VISION_H5") is not None:
-    ENABLE_MODEL6_VISION_H5 = _parse_bool_env("ENABLE_MODEL6_VISION_H5", default=False)
+# ML Model 2 — ResNet-152V2 vision H5 (Edward; questionnaire not used).
+if os.getenv("ENABLE_MODEL2_VISION_H5") is not None:
+    ENABLE_MODEL2_VISION_H5 = _parse_bool_env("ENABLE_MODEL2_VISION_H5", default=False)
+elif os.getenv("ENABLE_MODEL6_VISION_H5") is not None:
+    ENABLE_MODEL2_VISION_H5 = _parse_bool_env("ENABLE_MODEL6_VISION_H5", default=False)
 elif os.getenv("ENABLE_MODEL2_H5") is not None:
-    ENABLE_MODEL6_VISION_H5 = _parse_bool_env("ENABLE_MODEL2_H5", default=False)
+    ENABLE_MODEL2_VISION_H5 = _parse_bool_env("ENABLE_MODEL2_H5", default=False)
 else:
-    ENABLE_MODEL6_VISION_H5 = _parse_bool_env("ENABLE_H5_MODEL", default=False)
-MODEL6_VISION_H5_PATH = (
-    os.getenv("MODEL6_VISION_H5_PATH")
+    ENABLE_MODEL2_VISION_H5 = _parse_bool_env("ENABLE_H5_MODEL", default=False)
+MODEL2_VISION_H5_PATH = (
+    os.getenv("MODEL2_VISION_H5_PATH")
+    or os.getenv("MODEL6_VISION_H5_PATH")
     or os.getenv("H5_MODEL2_PATH")
     or os.getenv("H5_MODEL_PATH", "models/resnet152v2_lung_disease_final.h5")
 ).strip()
-# Edward ResNet-152V2 (legacy H5_MODEL2 / model6_vision_h5): 3 classes, index order per Edward's training.
+
+# ML Model 6 — tabular clinical screening (questionnaire → scaler.pkl → Keras H5).
+MODEL6_TABULAR_PATH = (
+    os.getenv("MODEL6_TABULAR_PATH")
+    or os.getenv("MODEL2_TABULAR_PATH")
+    or os.getenv("COPD_MODEL_PATH", "models/copd_screening_model.h5")
+).strip()
+MODEL6_SCALER_PATH = (
+    os.getenv("MODEL6_SCALER_PATH")
+    or os.getenv("MODEL2_SCALER_PATH")
+    or os.getenv("COPD_SCALER_PATH", "models/scaler.pkl")
+).strip()
+if os.getenv("ENABLE_MODEL6_TABULAR") is not None:
+    ENABLE_MODEL6_TABULAR = _parse_bool_env("ENABLE_MODEL6_TABULAR", default=True)
+elif os.getenv("ENABLE_MODEL2_TABULAR") is not None:
+    ENABLE_MODEL6_TABULAR = _parse_bool_env("ENABLE_MODEL2_TABULAR", default=True)
+elif os.getenv("ENABLE_COPD_MODEL") is not None:
+    ENABLE_MODEL6_TABULAR = os.getenv("ENABLE_COPD_MODEL", "true").lower() == "true"
+else:
+    ENABLE_MODEL6_TABULAR = True
+MODEL6_TABULAR_LABELS = ("Low COPD Risk", "High COPD Risk")
+# Edward ResNet-152V2 (legacy H5_MODEL2 / model2_vision_h5): 3 classes, index order per Edward's training.
 # Keras ImageDataGenerator alphabetical order would be Lung_Opacity, Normal, Viral_Pneumonia — confirm with Edward.
 H5_MODEL2_LABELS: tuple[str, ...] = ("Normal", "Viral_Pneumonia", "Lung_Opacity")
-MODEL6_VISION_LABELS = [
+MODEL2_VISION_LABELS = [
     lbl.replace("_", " ")
     for lbl in _parse_csv(
         os.getenv(
-            "MODEL6_VISION_LABELS",
+            "MODEL2_VISION_LABELS",
             os.getenv("H5_MODEL2_LABELS", ",".join(H5_MODEL2_LABELS)),
         )
     )
 ]
 # resnet_v2 = Keras ResNetV2 ImageNet scaling; scale_01 = divide by 255 only ([0, 1]).
-MODEL6_PREPROCESS_MODE = os.getenv("MODEL6_PREPROCESS_MODE", "resnet_v2").strip().lower()
+MODEL2_PREPROCESS_MODE = (
+    os.getenv("MODEL2_PREPROCESS_MODE")
+    or os.getenv("MODEL6_PREPROCESS_MODE", "resnet_v2")
+).strip().lower()
 # Prefer ENABLE_MODEL1; legacy ENABLE_MODEL1_PYTORCH honored if the new key is unset.
 if os.getenv("ENABLE_MODEL1") is not None:
     ENABLE_MODEL1 = _parse_bool_env("ENABLE_MODEL1", default=False)
@@ -371,11 +381,11 @@ def _encode_rgb_pil_png_base64(pil_img: Image.Image) -> str:
 MODEL1_PT: Any = None
 MODEL1_PT_LOAD_ERROR: str | None = None
 _MODEL1_PREPROCESS: Any = None
-MODEL2_TABULAR: Any = None
-MODEL2_SCALER: Any = None
-MODEL2_TABULAR_LOAD_ERROR: str | None = None
-MODEL6_VISION_H5: Any = None
-MODEL6_VISION_H5_LOAD_ERROR: str | None = None
+MODEL6_TABULAR: Any = None
+MODEL6_SCALER: Any = None
+MODEL6_TABULAR_LOAD_ERROR: str | None = None
+MODEL2_VISION_H5: Any = None
+MODEL2_VISION_H5_LOAD_ERROR: str | None = None
 MODEL_DENSENET121: Any = None
 MODEL_DENSENET121_LOAD_ERROR: str | None = None
 _DENSENET121_PREPROCESS: Any = None
@@ -385,7 +395,7 @@ MODEL5_DENSENET_H5: Any = None
 MODEL5_DENSENET_LOAD_ERROR: str | None = None
 TENSORFLOW_VERSION: str | None = None
 PYTORCH_VERSION: str | None = None
-_MODEL6_VISION_FILE_MISSING_WARNED = False
+_MODEL2_VISION_FILE_MISSING_WARNED = False
 
 # Config-driven registry: add model4+ entries + loader/predictor wiring in one place.
 MODEL_REGISTRY: list[dict[str, Any]] = [
@@ -398,9 +408,9 @@ MODEL_REGISTRY: list[dict[str, Any]] = [
     },
     {
         "id": "model2",
-        "health_key": "model2_tabular",
-        "name": "Clinical COPD screening (tabular)",
-        "kind": "tabular",
+        "health_key": "model2_resnet152v2",
+        "name": "ResNet-152V2 (Edward)",
+        "kind": "keras",
     },
     {
         "id": "model3",
@@ -423,9 +433,9 @@ MODEL_REGISTRY: list[dict[str, Any]] = [
     },
     {
         "id": "model6",
-        "health_key": "model6_resnet152v2",
-        "name": "ResNet152V2 (legacy vision)",
-        "kind": "keras",
+        "health_key": "model6_tabular",
+        "name": "Clinical COPD screening (tabular)",
+        "kind": "tabular",
     },
 ]
 
@@ -437,13 +447,13 @@ def _registry_health_aliases() -> dict[str, Any]:
             "enabled": ENABLE_MODEL1,
             "loaded": MODEL1_PT is not None,
         },
-        "model2_tabular": {
-            "enabled": ENABLE_MODEL2_TABULAR,
-            "loaded": MODEL2_TABULAR is not None and MODEL2_SCALER is not None,
+        "model6_tabular": {
+            "enabled": ENABLE_MODEL6_TABULAR,
+            "loaded": MODEL6_TABULAR is not None and MODEL6_SCALER is not None,
         },
-        "model6_resnet152v2": {
-            "enabled": ENABLE_MODEL6_VISION_H5,
-            "loaded": MODEL6_VISION_H5 is not None,
+        "model2_resnet152v2": {
+            "enabled": ENABLE_MODEL2_VISION_H5,
+            "loaded": MODEL2_VISION_H5 is not None,
         },
         "model3_densenet121": {
             "enabled": ENABLE_DENSENET121,
@@ -1061,9 +1071,9 @@ def _densenet121_predict_and_cam(image_bytes: bytes) -> dict[str, Any]:
     }
 
 
-def _model2_tabular_path_diagnostics() -> dict[str, Any]:
-    model_abs = os.path.abspath(MODEL2_TABULAR_PATH)
-    scaler_abs = os.path.abspath(MODEL2_SCALER_PATH)
+def _model6_tabular_path_diagnostics() -> dict[str, Any]:
+    model_abs = os.path.abspath(MODEL6_TABULAR_PATH)
+    scaler_abs = os.path.abspath(MODEL6_SCALER_PATH)
     model_exists = os.path.isfile(model_abs)
     scaler_exists = os.path.isfile(scaler_abs)
     model_size: int | None = None
@@ -1079,11 +1089,11 @@ def _model2_tabular_path_diagnostics() -> dict[str, Any]:
         except OSError as exc:
             logger.warning("Could not stat Model 2 scaler %s: %s", scaler_abs, exc)
     return {
-        "tabular_path": MODEL2_TABULAR_PATH,
+        "tabular_path": MODEL6_TABULAR_PATH,
         "tabular_absolute_path": model_abs,
         "tabular_exists": model_exists,
         "tabular_size_bytes": model_size,
-        "scaler_path": MODEL2_SCALER_PATH,
+        "scaler_path": MODEL6_SCALER_PATH,
         "scaler_absolute_path": scaler_abs,
         "scaler_exists": scaler_exists,
         "scaler_size_bytes": scaler_size,
@@ -1091,8 +1101,8 @@ def _model2_tabular_path_diagnostics() -> dict[str, Any]:
     }
 
 
-def _model6_vision_h5_path_diagnostics() -> dict[str, Any]:
-    abs_path = os.path.abspath(MODEL6_VISION_H5_PATH)
+def _model2_vision_h5_path_diagnostics() -> dict[str, Any]:
+    abs_path = os.path.abspath(MODEL2_VISION_H5_PATH)
     exists = os.path.isfile(abs_path)
     size_bytes: int | None = None
     if exists:
@@ -1101,7 +1111,7 @@ def _model6_vision_h5_path_diagnostics() -> dict[str, Any]:
         except OSError as exc:
             logger.warning("Could not stat Model 6 vision H5 %s: %s", abs_path, exc)
     return {
-        "path": MODEL6_VISION_H5_PATH,
+        "path": MODEL2_VISION_H5_PATH,
         "absolute_path": abs_path,
         "exists": exists,
         "size_bytes": size_bytes,
@@ -1116,18 +1126,18 @@ def _missing_enabled_model_files() -> list[str]:
             missing.append(
                 f"model1 missing: MODEL1_PATH={d1['path']!r} absolute_path={d1['absolute_path']!r}"
             )
-    if ENABLE_MODEL2_TABULAR:
-        d2 = _model2_tabular_path_diagnostics()
+    if ENABLE_MODEL6_TABULAR:
+        d2 = _model6_tabular_path_diagnostics()
         if not d2["exists"]:
             missing.append(
-                f"model2 tabular missing: MODEL2_TABULAR_PATH={d2['tabular_path']!r} "
-                f"MODEL2_SCALER_PATH={d2['scaler_path']!r}"
+                f"model6 tabular missing: MODEL6_TABULAR_PATH={d2['tabular_path']!r} "
+                f"MODEL6_SCALER_PATH={d2['scaler_path']!r}"
             )
-    if ENABLE_MODEL6_VISION_H5:
-        d6 = _model6_vision_h5_path_diagnostics()
+    if ENABLE_MODEL2_VISION_H5:
+        d6 = _model2_vision_h5_path_diagnostics()
         if not d6["exists"]:
             missing.append(
-                f"model6 vision missing: MODEL6_VISION_H5_PATH={d6['path']!r} "
+                f"model2 vision missing: MODEL2_VISION_H5_PATH={d6['path']!r} "
                 f"absolute_path={d6['absolute_path']!r}"
             )
     if ENABLE_DENSENET121:
@@ -1152,16 +1162,16 @@ def _missing_enabled_model_files() -> list[str]:
     return missing
 
 
-def _warn_model6_vision_file_missing_once(context: str) -> None:
-    global _MODEL6_VISION_FILE_MISSING_WARNED
-    if _MODEL6_VISION_FILE_MISSING_WARNED:
+def _warn_model2_vision_file_missing_once(context: str) -> None:
+    global _MODEL2_VISION_FILE_MISSING_WARNED
+    if _MODEL2_VISION_FILE_MISSING_WARNED:
         return
-    d6 = _model6_vision_h5_path_diagnostics()
+    d6 = _model2_vision_h5_path_diagnostics()
     if d6["exists"]:
         return
-    _MODEL6_VISION_FILE_MISSING_WARNED = True
+    _MODEL2_VISION_FILE_MISSING_WARNED = True
     logger.error(
-        "Model 6 legacy vision H5 is missing during %s. MODEL6_VISION_H5_PATH=%r "
+        "Model 2 ResNet-152V2 vision H5 is missing during %s. MODEL2_VISION_H5_PATH=%r "
         "absolute_path=%r.",
         context,
         d6["path"],
@@ -1247,65 +1257,65 @@ def _load_h5_model_compat(tf: Any, model_path: str) -> Any:
     )
 
 
-def _load_model2_tabular() -> None:
-    global MODEL2_TABULAR, MODEL2_SCALER, MODEL2_TABULAR_LOAD_ERROR
-    if not ENABLE_MODEL2_TABULAR:
-        MODEL2_TABULAR = None
-        MODEL2_SCALER = None
-        MODEL2_TABULAR_LOAD_ERROR = None
-        logger.info("Model 2 (tabular clinical) skipped: ENABLE_MODEL2_TABULAR is false.")
+def _load_model6_tabular() -> None:
+    global MODEL6_TABULAR, MODEL6_SCALER, MODEL6_TABULAR_LOAD_ERROR
+    if not ENABLE_MODEL6_TABULAR:
+        MODEL6_TABULAR = None
+        MODEL6_SCALER = None
+        MODEL6_TABULAR_LOAD_ERROR = None
+        logger.info("Model 6 (tabular clinical) skipped: ENABLE_MODEL6_TABULAR is false.")
         return
-    diag = _model2_tabular_path_diagnostics()
+    diag = _model6_tabular_path_diagnostics()
     try:
         if diag["exists"]:
-            MODEL2_TABULAR = load_model(diag["tabular_absolute_path"])
-            MODEL2_SCALER = joblib.load(diag["scaler_absolute_path"])
-            MODEL2_TABULAR_LOAD_ERROR = None
+            MODEL6_TABULAR = load_model(diag["tabular_absolute_path"])
+            MODEL6_SCALER = joblib.load(diag["scaler_absolute_path"])
+            MODEL6_TABULAR_LOAD_ERROR = None
             logger.info(
-                "Model 2 tabular loaded: model=%s scaler=%s",
+                "Model 6 tabular loaded: model=%s scaler=%s",
                 diag["tabular_absolute_path"],
                 diag["scaler_absolute_path"],
             )
         else:
-            MODEL2_TABULAR = None
-            MODEL2_SCALER = None
-            MODEL2_TABULAR_LOAD_ERROR = (
-                "Model 2 tabular assets not found "
+            MODEL6_TABULAR = None
+            MODEL6_SCALER = None
+            MODEL6_TABULAR_LOAD_ERROR = (
+                "Model 6 tabular assets not found "
                 f"(model={diag['tabular_path']!r}, scaler={diag['scaler_path']!r})."
             )
-            logger.warning("%s", MODEL2_TABULAR_LOAD_ERROR)
+            logger.warning("%s", MODEL6_TABULAR_LOAD_ERROR)
     except Exception as exc:
-        MODEL2_TABULAR = None
-        MODEL2_SCALER = None
-        MODEL2_TABULAR_LOAD_ERROR = str(exc)
-        logger.exception("Failed to load Model 2 tabular pipeline: %s", exc)
+        MODEL6_TABULAR = None
+        MODEL6_SCALER = None
+        MODEL6_TABULAR_LOAD_ERROR = str(exc)
+        logger.exception("Failed to load Model 6 tabular pipeline: %s", exc)
 
 
-def _load_model6_vision_h5() -> None:
-    global MODEL6_VISION_H5, MODEL6_VISION_H5_LOAD_ERROR, TENSORFLOW_VERSION
-    if not ENABLE_MODEL6_VISION_H5:
-        MODEL6_VISION_H5 = None
-        MODEL6_VISION_H5_LOAD_ERROR = None
-        logger.info("Model 6 legacy vision H5 skipped: ENABLE_MODEL6_VISION_H5 is false.")
+def _load_model2_vision_h5() -> None:
+    global MODEL2_VISION_H5, MODEL2_VISION_H5_LOAD_ERROR, TENSORFLOW_VERSION
+    if not ENABLE_MODEL2_VISION_H5:
+        MODEL2_VISION_H5 = None
+        MODEL2_VISION_H5_LOAD_ERROR = None
+        logger.info("Model 2 ResNet-152V2 vision H5 skipped: ENABLE_MODEL2_VISION_H5 is false.")
         return
-    if len(MODEL6_VISION_LABELS) != 3:
-        MODEL6_VISION_H5 = None
-        MODEL6_VISION_H5_LOAD_ERROR = "MODEL6_VISION_LABELS must contain exactly 3 labels."
+    if len(MODEL2_VISION_LABELS) != 3:
+        MODEL2_VISION_H5 = None
+        MODEL2_VISION_H5_LOAD_ERROR = "MODEL2_VISION_LABELS must contain exactly 3 labels."
         logger.error(
             "Model 6 vision H5 not loaded: need 3 labels, got %s (%r).",
-            len(MODEL6_VISION_LABELS),
-            MODEL6_VISION_LABELS,
+            len(MODEL2_VISION_LABELS),
+            MODEL2_VISION_LABELS,
         )
         return
-    diag = _model6_vision_h5_path_diagnostics()
+    diag = _model2_vision_h5_path_diagnostics()
     path = diag["absolute_path"]
     if not diag["exists"]:
-        MODEL6_VISION_H5 = None
-        MODEL6_VISION_H5_LOAD_ERROR = (
+        MODEL2_VISION_H5 = None
+        MODEL2_VISION_H5_LOAD_ERROR = (
             f"Model 6 vision H5 not found at {path!r} "
-            f"(MODEL6_VISION_H5_PATH={diag['path']!r})."
+            f"(MODEL2_VISION_H5_PATH={diag['path']!r})."
         )
-        logger.warning("%s", MODEL6_VISION_H5_LOAD_ERROR)
+        logger.warning("%s", MODEL2_VISION_H5_LOAD_ERROR)
         return
     try:
         import tensorflow as tf  # type: ignore
@@ -1315,7 +1325,7 @@ def _load_model6_vision_h5() -> None:
         tf.keras.mixed_precision.set_global_policy("mixed_float16")
         co = _make_h5_custom_objects(tf)
         try:
-            MODEL6_VISION_H5 = tf.keras.models.load_model(
+            MODEL2_VISION_H5 = tf.keras.models.load_model(
                 path, compile=False, custom_objects=co
             )
         except Exception:
@@ -1323,24 +1333,24 @@ def _load_model6_vision_h5() -> None:
                 "Model 6 vision H5 direct load failed; trying compat path.",
                 exc_info=True,
             )
-            MODEL6_VISION_H5 = _load_h5_model_compat(tf, path)
-        MODEL6_VISION_H5_LOAD_ERROR = None
-        logger.info("Model 6 legacy vision H5 loaded: %s", path)
+            MODEL2_VISION_H5 = _load_h5_model_compat(tf, path)
+        MODEL2_VISION_H5_LOAD_ERROR = None
+        logger.info("Model 2 ResNet-152V2 vision H5 loaded: %s", path)
     except Exception as exc:
-        MODEL6_VISION_H5 = None
-        MODEL6_VISION_H5_LOAD_ERROR = str(exc)
+        MODEL2_VISION_H5 = None
+        MODEL2_VISION_H5_LOAD_ERROR = str(exc)
         logger.exception("Model 6 vision H5 load failed.")
 
 
-def _preprocess_model6_vision_h5_numpy(image_bytes: bytes) -> Any:
-    """Model 6 legacy ResNet-152V2: RGB 224×224; scale per MODEL6_PREPROCESS_MODE."""
+def _preprocess_model2_vision_h5_numpy(image_bytes: bytes) -> Any:
+    """Model 6 legacy ResNet-152V2: RGB 224×224; scale per MODEL2_PREPROCESS_MODE."""
     import numpy as np  # type: ignore
 
-    w, h = MODEL6_VISION_H5_IMAGE_SIZE
+    w, h = MODEL2_VISION_H5_IMAGE_SIZE
     image = Image.open(BytesIO(image_bytes)).convert("RGB")
     image = image.resize((w, h), Image.Resampling.BILINEAR)
     img_array = np.asarray(image, dtype=np.float32)
-    if MODEL6_PREPROCESS_MODE == "scale_01":
+    if MODEL2_PREPROCESS_MODE == "scale_01":
         img_array = img_array / 255.0
     else:
         try:
@@ -1355,11 +1365,11 @@ def _preprocess_model6_vision_h5_numpy(image_bytes: bytes) -> Any:
     return np.expand_dims(img_array, axis=0)
 
 
-def _model6_vision_label_index_map() -> list[dict[str, Any]]:
+def _model2_vision_label_index_map() -> list[dict[str, Any]]:
     """Indexed labels for /health and /debug (Edward verification)."""
     return [
-        {"index": i, "label": _label_for_api(MODEL6_VISION_LABELS[i])}
-        for i in range(len(MODEL6_VISION_LABELS))
+        {"index": i, "label": _label_for_api(MODEL2_VISION_LABELS[i])}
+        for i in range(len(MODEL2_VISION_LABELS))
     ]
 
 
@@ -1367,30 +1377,30 @@ def _label_for_api(raw: str) -> str:
     return raw.replace("_", " ")
 
 
-def _model6_vision_decode_scores(row: Any) -> tuple[int, str, float, dict[str, float]]:
+def _model2_vision_decode_scores(row: Any) -> tuple[int, str, float, dict[str, float]]:
     import numpy as np  # type: ignore
 
     scores = np.asarray(row, dtype=np.float64).flatten()
-    n_labels = len(MODEL6_VISION_LABELS)
+    n_labels = len(MODEL2_VISION_LABELS)
     if scores.size < n_labels:
         raise ValueError(
             f"Model 6 H5 returned {scores.size} logits; expected {n_labels} "
-            f"for labels {MODEL6_VISION_LABELS!r}."
+            f"for labels {MODEL2_VISION_LABELS!r}."
         )
     if scores.size > n_labels:
         logger.warning(
             "Model 6 H5 returned %s logits; using first %s with labels %r.",
             scores.size,
             n_labels,
-            MODEL6_VISION_LABELS,
+            MODEL2_VISION_LABELS,
         )
         scores = scores[:n_labels]
     idx = int(np.argmax(scores))
-    raw_label = MODEL6_VISION_LABELS[idx]
+    raw_label = MODEL2_VISION_LABELS[idx]
     label = _label_for_api(raw_label)
     confidence = float(scores[idx])
     probabilities = {
-        _label_for_api(MODEL6_VISION_LABELS[i]): round(float(scores[i]), 4)
+        _label_for_api(MODEL2_VISION_LABELS[i]): round(float(scores[i]), 4)
         for i in range(n_labels)
     }
     return idx, label, confidence, probabilities
@@ -1455,22 +1465,22 @@ def _keras_gradcam_model6_to_png_base64(
         return None
 
 
-def _run_model6_vision_h5(image_bytes: bytes) -> dict[str, Any]:
-    if MODEL6_VISION_H5 is None:
+def _run_model2_vision_h5(image_bytes: bytes) -> dict[str, Any]:
+    if MODEL2_VISION_H5 is None:
         raise RuntimeError(
-            MODEL6_VISION_H5_LOAD_ERROR or "Model 6 legacy vision H5 is not loaded."
+            MODEL2_VISION_H5_LOAD_ERROR or "Model 2 ResNet-152V2 vision H5 is not loaded."
         )
     import numpy as np  # type: ignore
 
-    w, h = MODEL6_VISION_H5_IMAGE_SIZE
+    w, h = MODEL2_VISION_H5_IMAGE_SIZE
     image = Image.open(BytesIO(image_bytes)).convert("RGB")
     image = image.resize((w, h), Image.Resampling.BILINEAR)
     rgb_01 = np.asarray(image, dtype=np.float32) / 255.0
-    batch = _preprocess_model6_vision_h5_numpy(image_bytes)
-    out = MODEL6_VISION_H5.predict(batch, verbose=0)
-    idx, label, confidence, probabilities = _model6_vision_decode_scores(out[0])
+    batch = _preprocess_model2_vision_h5_numpy(image_bytes)
+    out = MODEL2_VISION_H5.predict(batch, verbose=0)
+    idx, label, confidence, probabilities = _model2_vision_decode_scores(out[0])
     gradcam_b64 = _keras_gradcam_model6_to_png_base64(
-        MODEL6_VISION_H5, batch, idx, rgb_01
+        MODEL2_VISION_H5, batch, idx, rgb_01
     )
     return {
         "prediction": label,
@@ -1480,21 +1490,21 @@ def _run_model6_vision_h5(image_bytes: bytes) -> dict[str, Any]:
     }
 
 
-def _model2_tabular_probabilities(prediction_prob: float) -> dict[str, float]:
+def _model6_tabular_probabilities(prediction_prob: float) -> dict[str, float]:
     """P(High COPD Risk) = prediction_prob; P(Low) = complement."""
     p_high = round(float(prediction_prob), 4)
     p_low = round(max(0.0, 1.0 - p_high), 4)
     return {
-        MODEL2_TABULAR_LABELS[0]: p_low,
-        MODEL2_TABULAR_LABELS[1]: p_high,
+        MODEL6_TABULAR_LABELS[0]: p_low,
+        MODEL6_TABULAR_LABELS[1]: p_high,
     }
 
 
-def _run_model2_tabular(patient_data: dict[str, Any]) -> dict[str, Any]:
+def _run_model6_tabular(patient_data: dict[str, Any]) -> dict[str, Any]:
     """Model 2: questionnaire → scaler.pkl → tabular Keras H5."""
-    if MODEL2_TABULAR is None or MODEL2_SCALER is None:
+    if MODEL6_TABULAR is None or MODEL6_SCALER is None:
         raise RuntimeError(
-            MODEL2_TABULAR_LOAD_ERROR or "Model 2 tabular pipeline is not loaded."
+            MODEL6_TABULAR_LOAD_ERROR or "Model 6 tabular pipeline is not loaded."
         )
 
     age = float(patient_data.get("age", 50.0))
@@ -1529,15 +1539,15 @@ def _run_model2_tabular(patient_data: dict[str, Any]) -> dict[str, Any]:
         [[age, fever, cough_days, smoking_val, breathing_val, 0.0, 0.0, 0.0, 0.0, 0.0]],
         dtype=np.float32,
     )
-    scaled_features = MODEL2_SCALER.transform(raw_features)
-    prediction_prob = float(MODEL2_TABULAR.predict(scaled_features, verbose=0)[0][0])
+    scaled_features = MODEL6_SCALER.transform(raw_features)
+    prediction_prob = float(MODEL6_TABULAR.predict(scaled_features, verbose=0)[0][0])
     label = (
-        MODEL2_TABULAR_LABELS[1]
+        MODEL6_TABULAR_LABELS[1]
         if prediction_prob > 0.5
-        else MODEL2_TABULAR_LABELS[0]
+        else MODEL6_TABULAR_LABELS[0]
     )
     conf = round(prediction_prob, 3)
-    probs = _model2_tabular_probabilities(prediction_prob)
+    probs = _model6_tabular_probabilities(prediction_prob)
     return {
         "prediction": label,
         "confidence": conf,
@@ -1549,7 +1559,7 @@ def _run_model2_tabular(patient_data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _model2_tabular_skipped_payload(reason: str = "questionnaire_required") -> dict[str, Any]:
+def _model6_tabular_skipped_payload(reason: str = "questionnaire_required") -> dict[str, Any]:
     return {
         "status": "skipped",
         "input_type": "tabular",
@@ -1558,11 +1568,30 @@ def _model2_tabular_skipped_payload(reason: str = "questionnaire_required") -> d
     }
 
 
-def _model2_tabular_failed_payload() -> dict[str, Any]:
+def _model6_tabular_failed_payload() -> dict[str, Any]:
     return {
         "status": "failed",
         "input_type": "tabular",
         "model_name": "Chronic Lung Risk (COPD)",
+    }
+
+
+def _model2_vision_skipped_payload(reason: str = "vision_disabled") -> dict[str, Any]:
+    return {
+        "status": "skipped",
+        "input_type": "vision",
+        "reason": reason,
+        "model_name": "ResNet-152V2 (Edward)",
+    }
+
+
+def _model2_vision_failed_payload() -> dict[str, Any]:
+    return {
+        "prediction": "N/A",
+        "confidence": 0.0,
+        "status": "failed",
+        "model_name": "ResNet-152V2 (Edward)",
+        "input_type": "vision",
     }
 
 
@@ -1925,8 +1954,8 @@ def _build_educator_ml_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "Model 1 (ResNet-50)": _format_vision_model_for_llm(
             "ResNet-50", payload.get("model1")
         ),
-        "Model 2 (Clinical COPD tabular)": _format_vision_model_for_llm(
-            "Clinical COPD", payload.get("model2")
+        "Model 2 (ResNet-152V2)": _format_vision_model_for_llm(
+            "ResNet-152V2", payload.get("model2")
         ),
         "Model 3 (DenseNet-121 PyTorch)": _format_vision_model_for_llm(
             "DenseNet-121", payload.get("model3")
@@ -1937,8 +1966,8 @@ def _build_educator_ml_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "Model 5 (DenseNet-121 H5)": _format_vision_model_for_llm(
             "DenseNet-121 H5", payload.get("model5_densenet")
         ),
-        "Model 6 (ResNet-152V2 legacy vision)": _format_vision_model_for_llm(
-            "ResNet-152V2", payload.get("model6_vision_h5")
+        "Model 6 (Clinical COPD tabular)": _format_vision_model_for_llm(
+            "Clinical COPD", payload.get("model6")
         ),
     }
 
@@ -2217,10 +2246,13 @@ def _build_pipeline_outputs(
     model1_pytorch_inference_ok: bool = False,
     model1_gradcam_b64: str | None = None,
     model1_probabilities: dict[str, float] | None = None,
-    model2_tabular_payload: dict[str, Any] | None = None,
-    model2_tabular_inference_ok: bool = False,
+    model2_vision_payload: dict[str, Any] | None = None,
+    model2_vision_inference_ok: bool = False,
+    model6_tabular_payload: dict[str, Any] | None = None,
+    model6_tabular_inference_ok: bool = False,
     timing_model1_ms: float = 18.0,
     timing_model2_ms: float = 22.0,
+    timing_model6_ms: float = 0.0,
     densenet_payload: dict[str, Any] | None = None,
     timing_densenet_ms: float = 0.0,
 ) -> dict[str, Any]:
@@ -2262,18 +2294,16 @@ def _build_pipeline_outputs(
             float(pred.get("COVID-19", 0.0)),
         )
 
-    if model2_tabular_inference_ok and model2_tabular_payload is not None:
-        model2_label = str(
-            model2_tabular_payload.get("prediction", model2_tabular_payload.get("label", ""))
+    if model6_tabular_inference_ok and model6_tabular_payload is not None:
+        model6_label = str(
+            model6_tabular_payload.get("prediction", model6_tabular_payload.get("label", ""))
         )
-        model2_confidence = round(
-            float(model2_tabular_payload.get("confidence", 0.0)), 3
+        model6_confidence = round(
+            float(model6_tabular_payload.get("confidence", 0.0)), 3
         )
-        model2_probabilities = model2_tabular_payload.get("probabilities") or {}
     else:
-        model2_label = ""
-        model2_confidence = 0.0
-        model2_probabilities = {}
+        model6_label = ""
+        model6_confidence = 0.0
 
     questionnaire_complete = _questionnaire_satisfied(questionnaire_data)
     requires_questionnaire = gate_route == "continue" and not questionnaire_complete
@@ -2320,8 +2350,8 @@ def _build_pipeline_outputs(
             f"Educational analysis suggests {imaging_label} with top imaging finding "
             f"{top_prediction} ({top_confidence:.2f})."
         ]
-        if model2_tabular_inference_ok and model2_label:
-            summary_lines.append(f"Clinical intake screening: {model2_label}.")
+        if model6_tabular_inference_ok and model6_label:
+            summary_lines.append(f"Clinical intake screening: {model6_label}.")
         patient_data = questionnaire_data.get("patient_data") if isinstance(questionnaire_data, dict) else None
         if isinstance(patient_data, dict):
             if patient_data.get("fever") is True:
@@ -2354,12 +2384,14 @@ def _build_pipeline_outputs(
     model4_timing = 40 if model4 else 0
     t1 = round(float(timing_model1_ms), 2)
     t2 = round(float(timing_model2_ms), 2)
+    t6 = round(float(timing_model6_ms), 2)
     timing_ms = {
         "model1": t1,
         "model2": t2,
         "model3": t_dn,
         "model4": model4_timing,
-        "total": round(t1 + t2 + t_dn + model4_timing, 2),
+        "model6": t6,
+        "total": round(t1 + t2 + t6 + t_dn + model4_timing, 2),
     }
 
     any_neural_ok = (
@@ -2374,14 +2406,22 @@ def _build_pipeline_outputs(
         model1_status = "load_failed"
     else:
         model1_status = "fallback"
-    if model2_tabular_inference_ok:
+    if model2_vision_inference_ok:
         model2_status = "ok"
-    elif not ENABLE_MODEL2_TABULAR:
+    elif not ENABLE_MODEL2_VISION_H5:
         model2_status = "skipped"
-    elif MODEL2_TABULAR is None or MODEL2_SCALER is None:
+    elif MODEL2_VISION_H5 is None:
         model2_status = "load_failed"
     else:
         model2_status = "skipped"
+    if model6_tabular_inference_ok:
+        model6_status = "ok"
+    elif not ENABLE_MODEL6_TABULAR:
+        model6_status = "skipped"
+    elif MODEL6_TABULAR is None or MODEL6_SCALER is None:
+        model6_status = "load_failed"
+    else:
+        model6_status = "skipped"
     if densenet_neural_ok:
         model3_flat_result = "model"
     elif not ENABLE_DENSENET121:
@@ -2394,7 +2434,8 @@ def _build_pipeline_outputs(
     # Flat section tags for frontend transparency (aligned with /analyze contract).
     provenance_flat = {
         "model1_result": "model" if model1_pytorch_inference_ok else "rules",
-        "model2_result": "model" if model2_tabular_inference_ok else "rules",
+        "model2_result": "model" if model2_vision_inference_ok else "rules",
+        "model6_result": "model" if model6_tabular_inference_ok else "rules",
         "model3_result": model3_flat_result,
         "clinical_risk_result": "rules" if clinical_risk_payload else "skipped",
         "gate_decision": "rules",
@@ -2426,9 +2467,12 @@ def _build_pipeline_outputs(
             ),
             **({"gradcam": model1_gradcam_b64} if model1_gradcam_b64 else {}),
         },
-        "model2": model2_tabular_payload
-        if model2_tabular_payload is not None
-        else _model2_tabular_failed_payload(),
+        "model2": model2_vision_payload
+        if model2_vision_payload is not None
+        else _model2_vision_failed_payload(),
+        "model6": model6_tabular_payload
+        if model6_tabular_payload is not None
+        else _model6_tabular_failed_payload(),
         "gate": {
             "route": gate_route,
             "reason": gate_reason,
@@ -2451,12 +2495,20 @@ def _build_pipeline_outputs(
                 "model_version": "v1" if model1_pytorch_inference_ok else "n/a",
             },
             "model2": {
-                "source": "model" if model2_tabular_inference_ok else "rules",
+                "source": "model" if model2_vision_inference_ok else "rules",
                 "status": model2_status,
-                "model_id": "model2-tabular-copd"
-                if model2_tabular_inference_ok
-                else "model2-tabular-unavailable",
-                "model_version": "pilot" if model2_tabular_inference_ok else "n/a",
+                "model_id": "resnet152v2-edward"
+                if model2_vision_inference_ok
+                else "resnet152v2-unavailable",
+                "model_version": "v1" if model2_vision_inference_ok else "n/a",
+            },
+            "model6": {
+                "source": "model" if model6_tabular_inference_ok else "rules",
+                "status": model6_status,
+                "model_id": "model6-tabular-copd"
+                if model6_tabular_inference_ok
+                else "model6-tabular-unavailable",
+                "model_version": "pilot" if model6_tabular_inference_ok else "n/a",
             },
             "model3": {
                 "source": "model" if densenet_neural_ok else "rules",
@@ -2492,7 +2544,7 @@ def _build_demo_normal_payload(
         "Pneumonia-Bacteria": 0.0,
         "Pneumonia-Virus": 0.01,
     }
-    demo_m2_tabular: dict[str, Any] = {
+    demo_m6_tabular: dict[str, Any] = {
         "prediction": "Low COPD Risk",
         "confidence": 0.91,
         "status": "success",
@@ -2503,6 +2555,20 @@ def _build_demo_normal_payload(
             "Low COPD Risk": 0.91,
             "High COPD Risk": 0.09,
         },
+    }
+    demo_m2_vision_probs = {
+        _label_for_api(H5_MODEL2_LABELS[0]): 0.97,
+        _label_for_api(H5_MODEL2_LABELS[1]): 0.02,
+        _label_for_api(H5_MODEL2_LABELS[2]): 0.01,
+    }
+    demo_m2_vision: dict[str, Any] = {
+        "prediction": "Normal",
+        "confidence": 0.97,
+        "status": "success",
+        "probabilities": demo_m2_vision_probs,
+        "gradcam": "",
+        "model_name": "ResNet-152V2 (Edward)",
+        "input_type": "vision",
     }
     demo_densenet: dict[str, Any] = {
         "class_id": 0,
@@ -2527,10 +2593,13 @@ def _build_demo_normal_payload(
         model1_pytorch_inference_ok=True,
         model1_gradcam_b64=None,
         model1_probabilities=demo_m1_probs,
-        model2_tabular_payload=demo_m2_tabular,
-        model2_tabular_inference_ok=True,
+        model2_vision_payload=demo_m2_vision,
+        model2_vision_inference_ok=True,
+        model6_tabular_payload=demo_m6_tabular,
+        model6_tabular_inference_ok=True,
         timing_model1_ms=10.0,
         timing_model2_ms=12.0,
+        timing_model6_ms=12.0,
         densenet_payload=demo_densenet,
         timing_densenet_ms=14.0,
     )
@@ -2542,7 +2611,8 @@ def _build_demo_normal_payload(
         "label": "Normal",
         "model_name": "ResNet50-3Class",
     }
-    payload["model2"] = demo_m2_tabular
+    payload["model2"] = demo_m2_vision
+    payload["model6"] = demo_m6_tabular
     # Keep full DenseNet-shaped model3 from _build_pipeline_outputs (demo_densenet).
     # Do not replace with a minimal dict — clients validate class_id, probabilities, etc.
     demo_m4_probs = {
@@ -2575,21 +2645,6 @@ def _build_demo_normal_payload(
         },
         "model_name": "Model 5 (DenseNet-121)",
     }
-    # Edward ResNet-152V2 (API model6_vision_h5): 3-class demo aligned with H5_MODEL2_LABELS order.
-    demo_m6_probs = {
-        _label_for_api(H5_MODEL2_LABELS[0]): 0.97,
-        _label_for_api(H5_MODEL2_LABELS[1]): 0.02,
-        _label_for_api(H5_MODEL2_LABELS[2]): 0.01,
-    }
-    payload["model6_vision_h5"] = {
-        "prediction": "Normal",
-        "confidence": 0.97,
-        "status": "success",
-        "probabilities": demo_m6_probs,
-        "gradcam": "",
-        "model_name": "ResNet-152V2 (Edward)",
-        "input_type": "vision",
-    }
     return payload
 
 
@@ -2610,10 +2665,10 @@ async def _analyze_run_vision_models(image_bytes: bytes) -> dict[str, Any]:
 
     if ENABLE_MODEL1 and MODEL1_PT is not None:
         pending["model1"] = _timed_thread_call(_run_pytorch_model1_full, image_bytes)
-    if ENABLE_MODEL6_VISION_H5:
-        _warn_model6_vision_file_missing_once("analyze")
-    if ENABLE_MODEL6_VISION_H5 and MODEL6_VISION_H5 is not None:
-        pending["model6"] = _timed_thread_call(_run_model6_vision_h5, image_bytes)
+    if ENABLE_MODEL2_VISION_H5:
+        _warn_model2_vision_file_missing_once("analyze")
+    if ENABLE_MODEL2_VISION_H5 and MODEL2_VISION_H5 is not None:
+        pending["model2"] = _timed_thread_call(_run_model2_vision_h5, image_bytes)
     if ENABLE_MODEL4_SWINT and MODEL4_SWINT is not None:
         pending["model4"] = _timed_thread_call(_run_swint_model4, image_bytes)
     if ENABLE_MODEL5_DENSENET and MODEL5_DENSENET_H5 is not None:
@@ -2688,20 +2743,21 @@ async def _analyze_internal(
             m1_conf_r = 0.0
             timing_model1_ms = 0.0
 
-            model2_tabular_result: dict[str, Any] = _model2_tabular_skipped_payload()
-            model2_tabular_inference_ok = False
-            timing_model2_ms = 0.0
+            model6_tabular_result: dict[str, Any] = _model6_tabular_skipped_payload()
+            model6_tabular_inference_ok = False
+            timing_model6_ms = 0.0
 
-            model6_vision_result: dict[str, Any] = {
+            model2_vision_result: dict[str, Any] = {
                 "prediction": "N/A",
                 "confidence": 0.0,
                 "status": "failed",
                 "model_name": "ResNet-152V2 (Edward)",
                 "input_type": "vision",
             }
-            model6_vision_inference_ok = False
-            model6_vision_label = "Normal"
-            model6_vision_conf = 0.0
+            model2_vision_inference_ok = False
+            model2_vision_label = "Normal"
+            model2_vision_conf = 0.0
+            timing_model2_ms = 0.0
 
             model4_swint_result: dict[str, Any] = {
                 "prediction": "N/A",
@@ -2738,38 +2794,38 @@ async def _analyze_internal(
                 else:
                     logger.warning("ML Model 1 PyTorch inference failed: %s", m1_err)
 
-            if isinstance(patient_data, dict) and ENABLE_MODEL2_TABULAR:
-                if MODEL2_TABULAR is not None and MODEL2_SCALER is not None:
-                    t_m2 = time.perf_counter()
+            if isinstance(patient_data, dict) and ENABLE_MODEL6_TABULAR:
+                if MODEL6_TABULAR is not None and MODEL6_SCALER is not None:
+                    t_m6 = time.perf_counter()
                     try:
-                        model2_tabular_result = await asyncio.to_thread(
-                            _run_model2_tabular, patient_data
+                        model6_tabular_result = await asyncio.to_thread(
+                            _run_model6_tabular, patient_data
                         )
-                        model2_tabular_inference_ok = True
+                        model6_tabular_inference_ok = True
                     except Exception as exc:
-                        logger.error("Model 2 tabular inference failed: %s", exc)
-                        model2_tabular_result = _model2_tabular_failed_payload()
-                    timing_model2_ms = (time.perf_counter() - t_m2) * 1000.0
+                        logger.error("Model 6 tabular inference failed: %s", exc)
+                        model6_tabular_result = _model6_tabular_failed_payload()
+                    timing_model6_ms = (time.perf_counter() - t_m6) * 1000.0
                 else:
-                    model2_tabular_result = _model2_tabular_failed_payload()
+                    model6_tabular_result = _model6_tabular_failed_payload()
 
-            if "model6" in vision_results:
-                m6_data, _m6_ms, m6_err = vision_results["model6"]
-                if m6_err is None and isinstance(m6_data, dict):
-                    model6_vision_label = str(m6_data.get("prediction", "Normal"))
-                    model6_vision_conf = round(float(m6_data.get("confidence", 0.0)), 3)
-                    model6_vision_result = {
-                        "prediction": model6_vision_label,
-                        "confidence": model6_vision_conf,
+            if "model2" in vision_results:
+                m2_data, timing_model2_ms, m2_err = vision_results["model2"]
+                if m2_err is None and isinstance(m2_data, dict):
+                    model2_vision_label = str(m2_data.get("prediction", "Normal"))
+                    model2_vision_conf = round(float(m2_data.get("confidence", 0.0)), 3)
+                    model2_vision_result = {
+                        "prediction": model2_vision_label,
+                        "confidence": model2_vision_conf,
                         "status": "success",
-                        "probabilities": m6_data.get("probabilities") or {},
-                        "gradcam": m6_data.get("gradcam") or "",
+                        "probabilities": m2_data.get("probabilities") or {},
+                        "gradcam": m2_data.get("gradcam") or "",
                         "model_name": "ResNet-152V2 (Edward)",
                         "input_type": "vision",
                     }
-                    model6_vision_inference_ok = True
+                    model2_vision_inference_ok = True
                 else:
-                    logger.warning("Model 6 legacy vision inference failed: %s", m6_err)
+                    logger.warning("Model 2 ResNet-152V2 vision inference failed: %s", m2_err)
 
             if "model4" in vision_results:
                 m4_data, _m4_ms, m4_err = vision_results["model4"]
@@ -2819,14 +2875,14 @@ async def _analyze_internal(
             if model1_pytorch_inference_ok and m1_label != "Normal":
                 base = "Pneumonia" if "Pneumonia" in m1_label else m1_label
                 predictions[base] = max(predictions.get(base, 0.0), m1_conf_r)
-            if model6_vision_inference_ok and model6_vision_label != "Normal":
+            if model2_vision_inference_ok and model2_vision_label != "Normal":
                 m6_base = (
                     "Pneumonia"
-                    if "Pneumonia" in model6_vision_label
-                    else model6_vision_label
+                    if "Pneumonia" in model2_vision_label
+                    else model2_vision_label
                 )
                 predictions[m6_base] = max(
-                    predictions.get(m6_base, 0.0), model6_vision_conf
+                    predictions.get(m6_base, 0.0), model2_vision_conf
                 )
             if model4_swint_inference_ok and model4_swint_label != "Normal":
                 m4_base = (
@@ -2865,16 +2921,18 @@ async def _analyze_internal(
                 model1_pytorch_inference_ok=model1_pytorch_inference_ok,
                 model1_gradcam_b64=model1_gradcam_b64,
                 model1_probabilities=model1_probabilities,
-                model2_tabular_payload=model2_tabular_result,
-                model2_tabular_inference_ok=model2_tabular_inference_ok,
+                model2_vision_payload=model2_vision_result,
+                model2_vision_inference_ok=model2_vision_inference_ok,
+                model6_tabular_payload=model6_tabular_result,
+                model6_tabular_inference_ok=model6_tabular_inference_ok,
                 timing_model1_ms=timing_model1_ms,
                 timing_model2_ms=timing_model2_ms,
+                timing_model6_ms=timing_model6_ms,
                 densenet_payload=densenet_payload,
                 timing_densenet_ms=timing_densenet_ms,
             )
             payload["model4_swint"] = model4_swint_result
             payload["model5_densenet"] = model5_densenet_result
-            payload["model6_vision_h5"] = model6_vision_result
 
         llm_patient_data: dict[str, Any] = dict(patient_data or {})
         if not llm_patient_data and isinstance(questionnaire_data, dict):
@@ -2922,8 +2980,8 @@ async def healthz() -> dict[str, str]:
 @app.on_event("startup")
 async def _startup_load_models() -> None:
     _load_model1_pytorch()
-    _load_model2_tabular()
-    _load_model6_vision_h5()
+    _load_model6_tabular()
+    _load_model2_vision_h5()
     _load_densenet121()
     _load_swint_model4()
     _load_densenet_model5()
@@ -2942,7 +3000,7 @@ async def _startup_load_models() -> None:
 @app.get("/health")
 async def health() -> dict[str, Any]:
     pth_diag = _model1_pt_path_diagnostics()
-    m2_diag = _model2_tabular_path_diagnostics()
+    m2_diag = _model6_tabular_path_diagnostics()
     dn_diag = _densenet121_path_diagnostics()
     return {
         "status": "ok",
@@ -2958,23 +3016,23 @@ async def health() -> dict[str, Any]:
                 "error": MODEL1_PT_LOAD_ERROR,
                 "labels": list(MODEL1_LABELS),
             },
-            "model2_tabular": {
-                "enabled": ENABLE_MODEL2_TABULAR,
-                "loaded": MODEL2_TABULAR is not None and MODEL2_SCALER is not None,
-                "error": MODEL2_TABULAR_LOAD_ERROR,
-                "labels": list(MODEL2_TABULAR_LABELS),
+            "model6_tabular": {
+                "enabled": ENABLE_MODEL6_TABULAR,
+                "loaded": MODEL6_TABULAR is not None and MODEL6_SCALER is not None,
+                "error": MODEL6_TABULAR_LOAD_ERROR,
+                "labels": list(MODEL6_TABULAR_LABELS),
                 **m2_diag,
             },
-            "model6_vision_h5": {
-                "enabled": ENABLE_MODEL6_VISION_H5,
-                "loaded": MODEL6_VISION_H5 is not None,
-                **_model6_vision_h5_path_diagnostics(),
-                "error": MODEL6_VISION_H5_LOAD_ERROR,
-                "labels": list(MODEL6_VISION_LABELS),
-                "label_indices": _model6_vision_label_index_map(),
+            "model2": {
+                "enabled": ENABLE_MODEL2_VISION_H5,
+                "loaded": MODEL2_VISION_H5 is not None,
+                **_model2_vision_h5_path_diagnostics(),
+                "error": MODEL2_VISION_H5_LOAD_ERROR,
+                "labels": list(MODEL2_VISION_LABELS),
+                "label_indices": _model2_vision_label_index_map(),
                 "h5_model2_labels_default": list(H5_MODEL2_LABELS),
-                "preprocess_mode": MODEL6_PREPROCESS_MODE,
-                "image_size": list(MODEL6_VISION_H5_IMAGE_SIZE),
+                "preprocess_mode": MODEL2_PREPROCESS_MODE,
+                "image_size": list(MODEL2_VISION_H5_IMAGE_SIZE),
             },
             "densenet121_pt": {
                 "enabled": ENABLE_DENSENET121,
@@ -3008,13 +3066,13 @@ async def health() -> dict[str, Any]:
 async def debug_model_status() -> dict[str, Any]:
     """Diagnostics for ML models and response provenance (no secrets)."""
     pth_diag = _model1_pt_path_diagnostics()
-    m2_diag = _model2_tabular_path_diagnostics()
+    m2_diag = _model6_tabular_path_diagnostics()
     dn_diag = _densenet121_path_diagnostics()
     tf_ver = TENSORFLOW_VERSION or _tensorflow_version_probe()
     pt_ver = PYTORCH_VERSION or _pytorch_version_probe()
     m1_ready = ENABLE_MODEL1 and MODEL1_PT is not None
     m2_ready = (
-        ENABLE_MODEL2_TABULAR and MODEL2_TABULAR is not None and MODEL2_SCALER is not None
+        ENABLE_MODEL6_TABULAR and MODEL6_TABULAR is not None and MODEL6_SCALER is not None
     )
     m3_ready = ENABLE_DENSENET121 and MODEL_DENSENET121 is not None
     m4_ready = ENABLE_MODEL4_SWINT and MODEL4_SWINT is not None
@@ -3031,23 +3089,23 @@ async def debug_model_status() -> dict[str, Any]:
             **pth_diag,
             "labels": list(MODEL1_LABELS),
         },
-        "model2_tabular": {
-            "enabled": ENABLE_MODEL2_TABULAR,
-            "loaded": MODEL2_TABULAR is not None and MODEL2_SCALER is not None,
-            "load_error": MODEL2_TABULAR_LOAD_ERROR,
+        "model6_tabular": {
+            "enabled": ENABLE_MODEL6_TABULAR,
+            "loaded": MODEL6_TABULAR is not None and MODEL6_SCALER is not None,
+            "load_error": MODEL6_TABULAR_LOAD_ERROR,
             **m2_diag,
-            "labels": list(MODEL2_TABULAR_LABELS),
+            "labels": list(MODEL6_TABULAR_LABELS),
         },
-        "model6_vision_h5": {
-            "enabled": ENABLE_MODEL6_VISION_H5,
-            "loaded": MODEL6_VISION_H5 is not None,
-            "load_error": MODEL6_VISION_H5_LOAD_ERROR,
-            **_model6_vision_h5_path_diagnostics(),
-            "labels": list(MODEL6_VISION_LABELS),
-            "label_indices": _model6_vision_label_index_map(),
+        "model2": {
+            "enabled": ENABLE_MODEL2_VISION_H5,
+            "loaded": MODEL2_VISION_H5 is not None,
+            "load_error": MODEL2_VISION_H5_LOAD_ERROR,
+            **_model2_vision_h5_path_diagnostics(),
+            "labels": list(MODEL2_VISION_LABELS),
+            "label_indices": _model2_vision_label_index_map(),
             "h5_model2_labels_default": list(H5_MODEL2_LABELS),
-            "preprocess_mode": MODEL6_PREPROCESS_MODE,
-            "image_size": list(MODEL6_VISION_H5_IMAGE_SIZE),
+            "preprocess_mode": MODEL2_PREPROCESS_MODE,
+            "image_size": list(MODEL2_VISION_H5_IMAGE_SIZE),
             "gradcam": "keras_gradient_tape",
         },
         "densenet121_pt": {

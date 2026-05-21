@@ -21,6 +21,19 @@
     "model_name": "ResNet50-3Class"
   },
   "model2": {
+    "prediction": "Normal",
+    "confidence": 0.97,
+    "status": "success",
+    "probabilities": {
+      "Normal": 0.97,
+      "Viral Pneumonia": 0.02,
+      "Lung Opacity": 0.01
+    },
+    "gradcam": "",
+    "model_name": "ResNet-152V2 (Edward)",
+    "input_type": "vision"
+  },
+  "model6": {
     "prediction": "Low COPD Risk",
     "confidence": 0.91,
     "status": "success",
@@ -72,7 +85,8 @@
     "model2": 12.0,
     "model3": 14.0,
     "model4": 40,
-    "total": 76.0
+    "model6": 12.0,
+    "total": 88.0
   },
   "requires_questionnaire": false,
   "warnings": [],
@@ -80,6 +94,7 @@
     "run_mode": "hybrid",
     "model1_result": "model",
     "model2_result": "model",
+    "model6_result": "model",
     "model3_result": "model",
     "clinical_risk_result": "rules",
     "gate_decision": "rules",
@@ -96,7 +111,13 @@
     "model2": {
       "source": "model",
       "status": "ok",
-      "model_id": "model2-tabular-copd",
+      "model_id": "resnet152v2-edward",
+      "model_version": "v1"
+    },
+    "model6": {
+      "source": "model",
+      "status": "ok",
+      "model_id": "model6-tabular-copd",
       "model_version": "pilot"
     },
     "model3": {
@@ -137,19 +158,6 @@
       "Pneumonia": 0.02
     },
     "model_name": "Model 5 (DenseNet-121)"
-  },
-  "model6_vision_h5": {
-    "prediction": "Normal",
-    "confidence": 0.97,
-    "status": "success",
-    "probabilities": {
-      "Normal": 0.97,
-      "Viral Pneumonia": 0.02,
-      "Lung Opacity": 0.01
-    },
-    "gradcam": "",
-    "model_name": "ResNet-152V2 (Edward)",
-    "input_type": "vision"
   },
   "llm_evaluation": {
     "status": "success",
