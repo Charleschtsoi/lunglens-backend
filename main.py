@@ -2907,121 +2907,6 @@ def _build_pipeline_outputs(
     }
 
 
-def _build_demo_normal_payload(
-    questionnaire_data: dict[str, Any] | None,
-) -> dict[str, Any]:
-    """May presentation bypass: healthy-normal ML snapshot without running inference."""
-    predictions: dict[str, float] = {"Normal": 0.99}
-    # Keys must match MODEL1_LABELS / frontend schema (not ad-hoc display strings).
-    demo_m1_probs = {
-        "Normal": 0.99,
-        "Pneumonia-Bacteria": 0.0,
-        "Pneumonia-Virus": 0.01,
-    }
-    demo_m6_tabular: dict[str, Any] = {
-        "prediction": "Low COPD Risk",
-        "confidence": 0.91,
-        "status": "success",
-        "input_type": "tabular",
-        "model_name": "Chronic Lung Risk (COPD)",
-        "label": "Low COPD Risk",
-        "probabilities": {
-            "Low COPD Risk": 0.91,
-            "High COPD Risk": 0.09,
-        },
-    }
-    demo_m2_vision_probs = {
-        _label_for_api(H5_MODEL2_LABELS[0]): 0.97,
-        _label_for_api(H5_MODEL2_LABELS[1]): 0.02,
-        _label_for_api(H5_MODEL2_LABELS[2]): 0.01,
-    }
-    demo_m2_vision: dict[str, Any] = {
-        "prediction": "Normal",
-        "confidence": 0.97,
-        "status": "success",
-        "probabilities": demo_m2_vision_probs,
-        "gradcam": "",
-        "model_name": "ResNet-152V2 (Edward)",
-        "input_type": "vision",
-    }
-    demo_densenet: dict[str, Any] = {
-        "class_id": 0,
-        "class_name": "Normal",
-        "confidence_score": 0.97,
-        "prediction": "Normal",
-        "confidence": 97.0,
-        "probabilities": {
-            "Normal": 0.97,
-            "Pneumonia-Bacteria": 0.015,
-            "Pneumonia-Virus": 0.015,
-        },
-        "gradcam": "",
-        "input_preview_base64": "",
-        "model_name": "DenseNet-121",
-    }
-    payload = _build_pipeline_outputs(
-        predictions,
-        questionnaire_data,
-        heatmap_base64="",
-        model1_override=("Normal", 0.99),
-        model1_pytorch_inference_ok=True,
-        model1_gradcam_b64=None,
-        model1_probabilities=demo_m1_probs,
-        model2_vision_payload=demo_m2_vision,
-        model2_vision_inference_ok=True,
-        model6_tabular_payload=demo_m6_tabular,
-        model6_tabular_inference_ok=True,
-        timing_model1_ms=10.0,
-        timing_model2_ms=12.0,
-        timing_model6_ms=12.0,
-        densenet_payload=demo_densenet,
-        timing_densenet_ms=14.0,
-    )
-    payload["model1"] = {
-        "prediction": "Normal",
-        "confidence": 0.99,
-        "status": "success",
-        "probabilities": demo_m1_probs,
-        "label": "Normal",
-        "model_name": "ResNet50-3Class",
-    }
-    payload["model2"] = demo_m2_vision
-    payload["model6"] = demo_m6_tabular
-    # Keep full DenseNet-shaped model3 from _build_pipeline_outputs (demo_densenet).
-    # Do not replace with a minimal dict — clients validate class_id, probabilities, etc.
-    demo_m4_probs = {
-        "COVID-19": 0.01,
-        "Lung_Opacity": 0.01,
-        "Normal": 0.96,
-        "Pneumonia": 0.01,
-        "Tuberculosis": 0.005,
-        "Viral_Pneumonia": 0.005,
-    }
-    # Align demo keys with MODEL4_SWINT_LABELS when env overrides label list.
-    if set(demo_m4_probs) != set(MODEL4_SWINT_LABELS):
-        demo_m4_probs = {lbl: (0.96 if lbl == "Normal" else round(0.04 / max(len(MODEL4_SWINT_LABELS) - 1, 1), 4)) for lbl in MODEL4_SWINT_LABELS}
-    payload["model4_swint"] = {
-        "prediction": "Normal",
-        "confidence": 0.96,
-        "status": "success",
-        "probabilities": demo_m4_probs,
-        "model_name": "Swin-T",
-    }
-    # Contract baseline for model5_densenet (demo + sample_response.json). Live inference
-    # may return more classes when MODEL5_DENSENET_LABELS has 14 NIH labels.
-    payload["model5_densenet"] = {
-        "prediction": "Normal",
-        "confidence": 0.98,
-        "status": "success",
-        "probabilities": {
-            "Normal": 0.98,
-            "Pneumonia": 0.02,
-        },
-        "model_name": "Model 5 (DenseNet-121)",
-    }
-    return payload
-
-
 async def _timed_thread_call(
     fn: Any, *args: Any
 ) -> tuple[Any, float, BaseException | None]:
@@ -3074,9 +2959,6 @@ async def _analyze_internal(
         if not image.filename:
             return _error_response("Missing uploaded image filename.", 400)
 
-        _fname = (image.filename or "").strip()
-        is_demo = _fname in {"demo_normal.jpeg", "demo_normal.jpg"}
-
         content_type = (image.content_type or "").lower()
         if content_type not in ALLOWED_IMAGE_MIME_TYPES:
             return _error_response(
@@ -3103,210 +2985,204 @@ async def _analyze_internal(
             if isinstance(maybe_patient_data, dict):
                 patient_data = maybe_patient_data
 
-        if is_demo:
-            logger.info(
-                "Demo mode triggered: Mocking ML results, but keeping LLM live."
-            )
-            payload = _build_demo_normal_payload(questionnaire_data)
-        else:
-            model1_override: tuple[str, float] | None = None
-            model1_pytorch_inference_ok = False
-            model1_gradcam_b64: str | None = None
-            model1_probabilities: dict[str, float] | None = None
-            m1_label = "Normal"
-            m1_conf_r = 0.0
-            timing_model1_ms = 0.0
+        model1_override: tuple[str, float] | None = None
+        model1_pytorch_inference_ok = False
+        model1_gradcam_b64: str | None = None
+        model1_probabilities: dict[str, float] | None = None
+        m1_label = "Normal"
+        m1_conf_r = 0.0
+        timing_model1_ms = 0.0
 
-            model6_tabular_result: dict[str, Any] = _model6_tabular_skipped_payload()
-            model6_tabular_inference_ok = False
-            timing_model6_ms = 0.0
+        model6_tabular_result: dict[str, Any] = _model6_tabular_skipped_payload()
+        model6_tabular_inference_ok = False
+        timing_model6_ms = 0.0
 
-            model2_vision_result: dict[str, Any] = {
-                "prediction": "N/A",
-                "confidence": 0.0,
-                "status": "failed",
-                "model_name": "ResNet-152V2 (Edward)",
-                "input_type": "vision",
-            }
-            model2_vision_inference_ok = False
-            model2_vision_label = "Normal"
-            model2_vision_conf = 0.0
-            timing_model2_ms = 0.0
+        model2_vision_result: dict[str, Any] = {
+            "prediction": "N/A",
+            "confidence": 0.0,
+            "status": "failed",
+            "model_name": "ResNet-152V2 (Edward)",
+            "input_type": "vision",
+        }
+        model2_vision_inference_ok = False
+        model2_vision_label = "Normal"
+        model2_vision_conf = 0.0
+        timing_model2_ms = 0.0
 
-            model4_swint_result: dict[str, Any] = {
-                "prediction": "N/A",
-                "confidence": 0.0,
-                "status": "failed",
-            }
-            model4_swint_label = "Normal"
-            model4_swint_conf = 0.0
-            model4_swint_inference_ok = False
+        model4_swint_result: dict[str, Any] = {
+            "prediction": "N/A",
+            "confidence": 0.0,
+            "status": "failed",
+        }
+        model4_swint_label = "Normal"
+        model4_swint_conf = 0.0
+        model4_swint_inference_ok = False
 
-            model5_densenet_result: dict[str, Any] = {
-                "prediction": "N/A",
-                "confidence": 0.0,
-                "status": "failed",
-            }
-            model5_label = ""
-            model5_conf = 0.0
-            model5_inference_ok = False
+        model5_densenet_result: dict[str, Any] = {
+            "prediction": "N/A",
+            "confidence": 0.0,
+            "status": "failed",
+        }
+        model5_label = ""
+        model5_conf = 0.0
+        model5_inference_ok = False
 
-            densenet_payload: dict[str, Any] = _densenet_analyze_error_payload()
-            timing_densenet_ms = 0.0
+        densenet_payload: dict[str, Any] = _densenet_analyze_error_payload()
+        timing_densenet_ms = 0.0
 
-            vision_results = await _analyze_run_vision_models(image_bytes)
+        vision_results = await _analyze_run_vision_models(image_bytes)
 
-            if "model1" in vision_results:
-                m1_data, timing_model1_ms, m1_err = vision_results["model1"]
-                if m1_err is None and m1_data is not None:
-                    m1_label, m1_conf, m1_probs, m1_gc = m1_data
-                    m1_conf_r = round(float(m1_conf), 3)
-                    model1_override = (m1_label, m1_conf_r)
-                    model1_gradcam_b64 = m1_gc
-                    model1_probabilities = m1_probs
-                    model1_pytorch_inference_ok = True
-                else:
-                    logger.warning("ML Model 1 PyTorch inference failed: %s", m1_err)
+        if "model1" in vision_results:
+            m1_data, timing_model1_ms, m1_err = vision_results["model1"]
+            if m1_err is None and m1_data is not None:
+                m1_label, m1_conf, m1_probs, m1_gc = m1_data
+                m1_conf_r = round(float(m1_conf), 3)
+                model1_override = (m1_label, m1_conf_r)
+                model1_gradcam_b64 = m1_gc
+                model1_probabilities = m1_probs
+                model1_pytorch_inference_ok = True
+            else:
+                logger.warning("ML Model 1 PyTorch inference failed: %s", m1_err)
 
-            if isinstance(patient_data, dict) and ENABLE_MODEL6_TABULAR:
-                if MODEL6_TABULAR is not None and MODEL6_SCALER is not None:
-                    t_m6 = time.perf_counter()
-                    try:
-                        model6_tabular_result = await asyncio.to_thread(
-                            _run_model6_tabular, patient_data
-                        )
-                        model6_tabular_inference_ok = True
-                    except Exception as exc:
-                        logger.error("Model 6 tabular inference failed: %s", exc)
-                        model6_tabular_result = _model6_tabular_failed_payload()
-                    timing_model6_ms = (time.perf_counter() - t_m6) * 1000.0
-                else:
+        if isinstance(patient_data, dict) and ENABLE_MODEL6_TABULAR:
+            if MODEL6_TABULAR is not None and MODEL6_SCALER is not None:
+                t_m6 = time.perf_counter()
+                try:
+                    model6_tabular_result = await asyncio.to_thread(
+                        _run_model6_tabular, patient_data
+                    )
+                    model6_tabular_inference_ok = True
+                except Exception as exc:
+                    logger.error("Model 6 tabular inference failed: %s", exc)
                     model6_tabular_result = _model6_tabular_failed_payload()
+                timing_model6_ms = (time.perf_counter() - t_m6) * 1000.0
+            else:
+                model6_tabular_result = _model6_tabular_failed_payload()
 
-            if "model2" in vision_results:
-                m2_data, timing_model2_ms, m2_err = vision_results["model2"]
-                if m2_err is None and isinstance(m2_data, dict):
-                    model2_vision_label = str(m2_data.get("prediction", "Normal"))
-                    model2_vision_conf = round(float(m2_data.get("confidence", 0.0)), 3)
-                    model2_vision_result = {
-                        "prediction": model2_vision_label,
-                        "confidence": model2_vision_conf,
-                        "status": "success",
-                        "probabilities": m2_data.get("probabilities") or {},
-                        "gradcam": m2_data.get("gradcam") or "",
-                        "model_name": "ResNet-152V2 (Edward)",
-                        "input_type": "vision",
-                    }
-                    model2_vision_inference_ok = True
-                else:
-                    logger.warning("Model 2 ResNet-152V2 vision inference failed: %s", m2_err)
+        if "model2" in vision_results:
+            m2_data, timing_model2_ms, m2_err = vision_results["model2"]
+            if m2_err is None and isinstance(m2_data, dict):
+                model2_vision_label = str(m2_data.get("prediction", "Normal"))
+                model2_vision_conf = round(float(m2_data.get("confidence", 0.0)), 3)
+                model2_vision_result = {
+                    "prediction": model2_vision_label,
+                    "confidence": model2_vision_conf,
+                    "status": "success",
+                    "probabilities": m2_data.get("probabilities") or {},
+                    "gradcam": m2_data.get("gradcam") or "",
+                    "model_name": "ResNet-152V2 (Edward)",
+                    "input_type": "vision",
+                }
+                model2_vision_inference_ok = True
+            else:
+                logger.warning("Model 2 ResNet-152V2 vision inference failed: %s", m2_err)
 
-            if "model4" in vision_results:
-                m4_data, _m4_ms, m4_err = vision_results["model4"]
-                if m4_err is None and m4_data is not None:
-                    model4_swint_label, model4_swint_conf, model4_swint_probs = m4_data
-                    model4_swint_conf = round(float(model4_swint_conf), 3)
-                    model4_swint_result = {
-                        "prediction": model4_swint_label,
-                        "confidence": model4_swint_conf,
-                        "status": "success",
-                        "probabilities": model4_swint_probs,
-                        "model_name": "Swin-T",
-                    }
-                    model4_swint_inference_ok = True
-                else:
-                    logger.error("Model 4 (Swin-T) inference failed: %s", m4_err)
+        if "model4" in vision_results:
+            m4_data, _m4_ms, m4_err = vision_results["model4"]
+            if m4_err is None and m4_data is not None:
+                model4_swint_label, model4_swint_conf, model4_swint_probs = m4_data
+                model4_swint_conf = round(float(model4_swint_conf), 3)
+                model4_swint_result = {
+                    "prediction": model4_swint_label,
+                    "confidence": model4_swint_conf,
+                    "status": "success",
+                    "probabilities": model4_swint_probs,
+                    "model_name": "Swin-T",
+                }
+                model4_swint_inference_ok = True
+            else:
+                logger.error("Model 4 (Swin-T) inference failed: %s", m4_err)
 
-            if "model5" in vision_results:
-                m5_data, _m5_ms, m5_err = vision_results["model5"]
-                if m5_err is None and isinstance(m5_data, dict):
-                    model5_densenet_result = m5_data
-                    model5_label = str(model5_densenet_result.get("prediction", ""))
-                    model5_conf = float(model5_densenet_result.get("confidence", 0.0))
-                    model5_inference_ok = (
-                        model5_densenet_result.get("status") == "success"
-                    )
-                else:
-                    logger.error("Model 5 (DenseNet-121 H5) inference failed: %s", m5_err)
+        if "model5" in vision_results:
+            m5_data, _m5_ms, m5_err = vision_results["model5"]
+            if m5_err is None and isinstance(m5_data, dict):
+                model5_densenet_result = m5_data
+                model5_label = str(model5_densenet_result.get("prediction", ""))
+                model5_conf = float(model5_densenet_result.get("confidence", 0.0))
+                model5_inference_ok = (
+                    model5_densenet_result.get("status") == "success"
+                )
+            else:
+                logger.error("Model 5 (DenseNet-121 H5) inference failed: %s", m5_err)
 
-            if "model3" in vision_results:
-                m3_data, timing_densenet_ms, m3_err = vision_results["model3"]
-                if m3_err is None and isinstance(m3_data, dict):
-                    densenet_payload = {**m3_data, "model_name": "DenseNet-121"}
-                else:
-                    logger.warning(
-                        "DenseNet-121 in analyze pipeline failed (model1/model2 unaffected): %s",
-                        m3_err,
-                    )
-                    densenet_payload = _densenet_analyze_error_payload(
-                        (str(m3_err) or "Model not available")[:500]
-                    )
+        if "model3" in vision_results:
+            m3_data, timing_densenet_ms, m3_err = vision_results["model3"]
+            if m3_err is None and isinstance(m3_data, dict):
+                densenet_payload = {**m3_data, "model_name": "DenseNet-121"}
+            else:
+                logger.warning(
+                    "DenseNet-121 in analyze pipeline failed (model1/model2 unaffected): %s",
+                    m3_err,
+                )
+                densenet_payload = _densenet_analyze_error_payload(
+                    (str(m3_err) or "Model not available")[:500]
+                )
 
-            densenet_neural_ok = (
-                "prediction" in densenet_payload and "error" not in densenet_payload
+        densenet_neural_ok = (
+            "prediction" in densenet_payload and "error" not in densenet_payload
+        )
+        predictions: dict[str, float] = {}
+        if model1_pytorch_inference_ok and m1_label != "Normal":
+            base = "Pneumonia" if "Pneumonia" in m1_label else m1_label
+            predictions[base] = max(predictions.get(base, 0.0), m1_conf_r)
+        if model2_vision_inference_ok and model2_vision_label != "Normal":
+            m6_base = (
+                "Pneumonia"
+                if "Pneumonia" in model2_vision_label
+                else model2_vision_label
             )
-            predictions: dict[str, float] = {}
-            if model1_pytorch_inference_ok and m1_label != "Normal":
-                base = "Pneumonia" if "Pneumonia" in m1_label else m1_label
-                predictions[base] = max(predictions.get(base, 0.0), m1_conf_r)
-            if model2_vision_inference_ok and model2_vision_label != "Normal":
-                m6_base = (
-                    "Pneumonia"
-                    if "Pneumonia" in model2_vision_label
-                    else model2_vision_label
-                )
-                predictions[m6_base] = max(
-                    predictions.get(m6_base, 0.0), model2_vision_conf
-                )
-            if model4_swint_inference_ok and model4_swint_label != "Normal":
-                m4_base = (
-                    "Pneumonia"
-                    if "Pneumonia" in model4_swint_label
-                    else model4_swint_label
-                )
-                predictions[m4_base] = max(
-                    predictions.get(m4_base, 0.0), model4_swint_conf
-                )
-            if (
-                model5_inference_ok
-                and model5_label
-                and model5_label != "Normal"
-                and model5_conf >= 0.5
-            ):
-                predictions[model5_label] = max(
-                    predictions.get(model5_label, 0.0), model5_conf
-                )
-            m3_class_name = str(densenet_payload.get("class_name", densenet_payload.get("prediction", "")))
-            if densenet_neural_ok and m3_class_name and m3_class_name != "Normal":
-                m3_pred = m3_class_name
-                if "confidence_score" in densenet_payload:
-                    m3_conf = float(densenet_payload["confidence_score"])
-                else:
-                    m3_conf = float(densenet_payload["confidence"]) / 100.0
-                predictions[m3_pred] = max(predictions.get(m3_pred, 0.0), m3_conf)
-            if not predictions:
-                predictions["Normal"] = 1.0
-
-            payload = _build_pipeline_outputs(
-                predictions,
-                questionnaire_data,
-                heatmap_base64="",
-                model1_override=model1_override,
-                model1_pytorch_inference_ok=model1_pytorch_inference_ok,
-                model1_gradcam_b64=model1_gradcam_b64,
-                model1_probabilities=model1_probabilities,
-                model2_vision_payload=model2_vision_result,
-                model2_vision_inference_ok=model2_vision_inference_ok,
-                model6_tabular_payload=model6_tabular_result,
-                model6_tabular_inference_ok=model6_tabular_inference_ok,
-                timing_model1_ms=timing_model1_ms,
-                timing_model2_ms=timing_model2_ms,
-                timing_model6_ms=timing_model6_ms,
-                densenet_payload=densenet_payload,
-                timing_densenet_ms=timing_densenet_ms,
+            predictions[m6_base] = max(
+                predictions.get(m6_base, 0.0), model2_vision_conf
             )
-            payload["model4_swint"] = model4_swint_result
-            payload["model5_densenet"] = model5_densenet_result
+        if model4_swint_inference_ok and model4_swint_label != "Normal":
+            m4_base = (
+                "Pneumonia"
+                if "Pneumonia" in model4_swint_label
+                else model4_swint_label
+            )
+            predictions[m4_base] = max(
+                predictions.get(m4_base, 0.0), model4_swint_conf
+            )
+        if (
+            model5_inference_ok
+            and model5_label
+            and model5_label != "Normal"
+            and model5_conf >= 0.5
+        ):
+            predictions[model5_label] = max(
+                predictions.get(model5_label, 0.0), model5_conf
+            )
+        m3_class_name = str(densenet_payload.get("class_name", densenet_payload.get("prediction", "")))
+        if densenet_neural_ok and m3_class_name and m3_class_name != "Normal":
+            m3_pred = m3_class_name
+            if "confidence_score" in densenet_payload:
+                m3_conf = float(densenet_payload["confidence_score"])
+            else:
+                m3_conf = float(densenet_payload["confidence"]) / 100.0
+            predictions[m3_pred] = max(predictions.get(m3_pred, 0.0), m3_conf)
+        if not predictions:
+            predictions["Normal"] = 1.0
+
+        payload = _build_pipeline_outputs(
+            predictions,
+            questionnaire_data,
+            heatmap_base64="",
+            model1_override=model1_override,
+            model1_pytorch_inference_ok=model1_pytorch_inference_ok,
+            model1_gradcam_b64=model1_gradcam_b64,
+            model1_probabilities=model1_probabilities,
+            model2_vision_payload=model2_vision_result,
+            model2_vision_inference_ok=model2_vision_inference_ok,
+            model6_tabular_payload=model6_tabular_result,
+            model6_tabular_inference_ok=model6_tabular_inference_ok,
+            timing_model1_ms=timing_model1_ms,
+            timing_model2_ms=timing_model2_ms,
+            timing_model6_ms=timing_model6_ms,
+            densenet_payload=densenet_payload,
+            timing_densenet_ms=timing_densenet_ms,
+        )
+        payload["model4_swint"] = model4_swint_result
+        payload["model5_densenet"] = model5_densenet_result
 
         llm_patient_data: dict[str, Any] = dict(patient_data or {})
         if not llm_patient_data and isinstance(questionnaire_data, dict):
