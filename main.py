@@ -7,13 +7,14 @@ import base64
 import math
 import tempfile
 import time
+import uuid
 from io import BytesIO
-from typing import Any, List
+from typing import Any, List, Literal
 
 import joblib
 import numpy as np
 import google.generativeai as genai
-from fastapi import FastAPI, File, Form, Header, UploadFile
+from fastapi import FastAPI, File, Form, Header, UploadFile, Path
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
@@ -2970,16 +2971,100 @@ async def _analyze_run_vision_models(image_bytes: bytes) -> dict[str, Any]:
     return dict(zip(keys, gathered, strict=True))
 
 
+AnalyzeJobStatus = Literal["queued", "processing", "complete", "failed"]
+ANALYZE_JOBS: dict[str, dict[str, Any]] = {}
+MAX_ANALYZE_JOBS = 200
+ANALYZE_JOB_TTL_SECONDS = 3600
+
+
+def _prune_analyze_jobs() -> None:
+    if len(ANALYZE_JOBS) <= MAX_ANALYZE_JOBS:
+        return
+    now = time.time()
+    expired = [
+        job_id
+        for job_id, job in ANALYZE_JOBS.items()
+        if now - float(job.get("created_at", now)) > ANALYZE_JOB_TTL_SECONDS
+    ]
+    for job_id in expired:
+        ANALYZE_JOBS.pop(job_id, None)
+    if len(ANALYZE_JOBS) <= MAX_ANALYZE_JOBS:
+        return
+    oldest = sorted(
+        ANALYZE_JOBS.items(),
+        key=lambda item: float(item[1].get("created_at", 0.0)),
+    )
+    for job_id, _ in oldest[: max(0, len(ANALYZE_JOBS) - MAX_ANALYZE_JOBS)]:
+        ANALYZE_JOBS.pop(job_id, None)
+
+
+async def _run_analyze_job(
+    job_id: str,
+    image_bytes: bytes,
+    filename: str,
+    content_type: str,
+    questionnaire: str | None,
+    gemini_api_key: str | None,
+) -> None:
+    job = ANALYZE_JOBS.get(job_id)
+    if job is None:
+        return
+    job["status"] = "processing"
+    try:
+        upload = UploadFile(
+            file=BytesIO(image_bytes),
+            filename=filename,
+            size=len(image_bytes),
+            headers={"content-type": content_type},
+        )
+        response = await _analyze_internal(
+            image=upload,
+            questionnaire=questionnaire,
+            x_api_key=None,
+            gemini_api_key=gemini_api_key,
+            skip_auth=True,
+        )
+        raw_body = getattr(response, "body", b"") or b""
+        try:
+            body = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+        except json.JSONDecodeError:
+            body = {}
+        if response.status_code == 200 and isinstance(body, dict):
+            job["status"] = "complete"
+            job["result"] = body
+            job["error"] = None
+            job["error_code"] = None
+            return
+        err_msg = (
+            body.get("error") if isinstance(body, dict) else None
+        ) or f"Analyze failed ({response.status_code})."
+        job["status"] = "failed"
+        job["result"] = None
+        job["error"] = str(err_msg)[:500]
+        job["error_code"] = (
+            body.get("error_code") if isinstance(body, dict) else "backend_unavailable"
+        )
+    except Exception as exc:
+        logger.exception("Analyze job %s failed", job_id)
+        job["status"] = "failed"
+        job["result"] = None
+        job["error"] = str(exc)[:500]
+        job["error_code"] = "internal_error"
+
+
 async def _analyze_internal(
     image: UploadFile,
     questionnaire: str | None,
     x_api_key: str | None,
     gemini_api_key: str | None,
+    *,
+    skip_auth: bool = False,
 ) -> JSONResponse:
     try:
-        auth_error = _validate_api_key(x_api_key)
-        if auth_error is not None:
-            return auth_error
+        if not skip_auth:
+            auth_error = _validate_api_key(x_api_key)
+            if auth_error is not None:
+                return auth_error
 
         if not image.filename:
             return _error_response("Missing uploaded image filename.", 400)
@@ -3556,6 +3641,109 @@ async def gemini_api_key_health_check(
     )
     result = await asyncio.to_thread(_probe_user_gemini_key, raw)
     return JSONResponse(status_code=200, content=result)
+
+
+@app.post("/api/v1/analyze/jobs")
+async def create_analyze_job(
+    image: UploadFile = File(...),
+    questionnaire: str | None = Form(None),
+    gemini_api_key: str | None = Form(None),
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> JSONResponse:
+    """Accept image and run analyze in background; poll GET /api/v1/analyze/jobs/{job_id}."""
+    auth_error = _validate_api_key(x_api_key)
+    if auth_error is not None:
+        return auth_error
+
+    if not image.filename:
+        return _error_response("Missing uploaded image filename.", 400)
+
+    content_type = (image.content_type or "").lower()
+    if content_type not in ALLOWED_IMAGE_MIME_TYPES:
+        return _error_response(
+            f"Unsupported image content type: {content_type or 'unknown'}.", 415
+        )
+
+    image_bytes = await image.read()
+    if not image_bytes:
+        return _error_response("Uploaded image is empty.", 400)
+    if len(image_bytes) > MAX_UPLOAD_BYTES:
+        return _error_response(
+            f"Uploaded image exceeds max size of {MAX_UPLOAD_MB} MB.", 413
+        )
+
+    try:
+        Image.open(BytesIO(image_bytes)).verify()
+    except Exception:
+        return _error_response("Uploaded file is not a valid image.", 400)
+
+    _prune_analyze_jobs()
+    job_id = str(uuid.uuid4())
+    ANALYZE_JOBS[job_id] = {
+        "status": "queued",
+        "created_at": time.time(),
+        "result": None,
+        "error": None,
+        "error_code": None,
+    }
+    asyncio.create_task(
+        _run_analyze_job(
+            job_id,
+            image_bytes,
+            image.filename,
+            content_type,
+            questionnaire,
+            gemini_api_key,
+        )
+    )
+    return JSONResponse(
+        status_code=202,
+        content={
+            "success": True,
+            "job_id": job_id,
+            "status": "queued",
+        },
+    )
+
+
+@app.get("/api/v1/analyze/jobs/{job_id}")
+async def get_analyze_job(
+    job_id: str = Path(..., min_length=8, max_length=64),
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> JSONResponse:
+    auth_error = _validate_api_key(x_api_key)
+    if auth_error is not None:
+        return auth_error
+
+    job = ANALYZE_JOBS.get(job_id)
+    if job is None:
+        return _error_response("Analyze job not found.", 404)
+
+    status: AnalyzeJobStatus = job.get("status", "queued")
+    if status == "complete" and isinstance(job.get("result"), dict):
+        return JSONResponse(
+            status_code=200,
+            content={
+                "job_id": job_id,
+                "status": "complete",
+                "result": job["result"],
+            },
+        )
+    if status == "failed":
+        return JSONResponse(
+            status_code=200,
+            content={
+                "job_id": job_id,
+                "status": "failed",
+                "error": job.get("error") or "Analyze job failed.",
+                "error_code": job.get("error_code") or "backend_unavailable",
+                "retryable": True,
+            },
+        )
+    return JSONResponse(
+        status_code=200,
+        content={"job_id": job_id, "status": status},
+    )
 
 
 @app.post("/api/v1/analyze")
