@@ -1264,9 +1264,16 @@ def _densenet121_predict_and_cam(image_bytes: bytes) -> dict[str, Any]:
     input_preview_b64 = _encode_rgb_pil_png_base64(cropped224)
 
     target_layers = [MODEL_DENSENET121.features.denseblock4]
-    gradcam_b64 = _pytorch_gradcam_to_png_base64(
-        MODEL_DENSENET121, tensor, target_layers, pred_idx, rgb_display
-    )
+    try:
+        gradcam_b64 = _pytorch_gradcam_to_png_base64(
+            MODEL_DENSENET121, tensor, target_layers, pred_idx, rgb_display
+        )
+    except Exception as exc:
+        logger.warning(
+            "DenseNet-121 Grad-CAM failed; returning prediction without heatmap: %s",
+            exc,
+        )
+        gradcam_b64 = ""
 
     return {
         "class_id": pred_idx,
@@ -1410,6 +1417,12 @@ def _make_h5_custom_objects(tf: Any) -> dict[str, Any]:
         def __init__(self, **kwargs: Any) -> None:
             kwargs.pop("quantization_config", None)
             super().__init__(**kwargs)
+
+        @classmethod
+        def from_config(cls, config: dict[str, Any]) -> Any:
+            cfg = dict(config)
+            cfg.pop("quantization_config", None)
+            return super().from_config(cfg)
 
     return {
         "BatchNormalization": PatchedBatchNormalization,
