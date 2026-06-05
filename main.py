@@ -1406,7 +1406,15 @@ def _make_h5_custom_objects(tf: Any) -> dict[str, Any]:
             kwargs.pop("renorm_momentum", None)
             super().__init__(**kwargs)
 
-    return {"BatchNormalization": PatchedBatchNormalization}
+    class PatchedDense(tf.keras.layers.Dense):
+        def __init__(self, **kwargs: Any) -> None:
+            kwargs.pop("quantization_config", None)
+            super().__init__(**kwargs)
+
+    return {
+        "BatchNormalization": PatchedBatchNormalization,
+        "Dense": PatchedDense,
+    }
 
 
 def _sanitize_keras_h5_config(node: Any) -> None:
@@ -1477,12 +1485,26 @@ def _load_model6_tabular() -> None:
     diag = _model6_tabular_path_diagnostics()
     try:
         if diag["exists"]:
-            MODEL6_TABULAR = load_model(diag["tabular_absolute_path"])
+            import tensorflow as tf  # type: ignore
+
+            path = diag["tabular_absolute_path"]
+            co = _make_h5_custom_objects(tf)
+            try:
+                logger.info("Model 6 tabular: attempting direct H5 load.")
+                MODEL6_TABULAR = tf.keras.models.load_model(
+                    path, compile=False, custom_objects=co
+                )
+            except Exception:
+                logger.warning(
+                    "Model 6 tabular direct load failed; trying compat path.",
+                    exc_info=True,
+                )
+                MODEL6_TABULAR = _load_h5_model_compat(tf, path)
             MODEL6_SCALER = joblib.load(diag["scaler_absolute_path"])
             MODEL6_TABULAR_LOAD_ERROR = None
             logger.info(
                 "Model 6 tabular loaded: model=%s scaler=%s",
-                diag["tabular_absolute_path"],
+                path,
                 diag["scaler_absolute_path"],
             )
         else:
