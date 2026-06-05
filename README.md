@@ -226,7 +226,23 @@ For local frontend integration:
 - If backend requires key, frontend/SSR must send `X-API-Key`.
 - Questionnaire impacts `clinical_risk` and `model4` summary context, not the base model inference outputs.
 
-## 8) Production safety checklist
+## 8) Hugging Face Space + Vercel frontend
+
+Full step-by-step (API key, `hf` CLI secrets/variables, model upload, push commands, Vercel env):
+
+**[DEPLOY_HUGGINGFACE_VERCEL.md](DEPLOY_HUGGINGFACE_VERCEL.md)**
+
+Quick push (code only):
+
+```bash
+git push origin main && git push hf main
+```
+
+Public API base URL for Vercel `BACKEND_API_BASE_URL`:
+
+`https://charleschtsoi-lunglens-backend.hf.space`
+
+## 9) Production safety checklist
 
 Before deploying publicly:
 
@@ -236,7 +252,7 @@ Before deploying publicly:
 - Set `REQUIRE_API_KEY=true` and a strong `API_KEY`.
 - Store model files securely in host-managed storage.
 
-## 9) Docker (optional)
+## 10) Docker (optional)
 
 Build:
 
@@ -255,7 +271,7 @@ docker run --rm -p 7860:7860 \
   lunglens-backend
 ```
 
-## 10) Common teammate pitfalls
+## 11) Common teammate pitfalls
 
 - Wrong Python interpreter (tests fail due to missing deps).
 - Model path points to non-existent file.

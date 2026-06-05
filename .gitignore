@@ -2,6 +2,8 @@ __pycache__/
 *.pyc
 .DS_Store
 .env
+.env.hf.secrets
+.env.hf.variables
 .venv/
 venv/
 models/
