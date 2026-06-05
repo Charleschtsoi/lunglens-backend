@@ -1501,18 +1501,8 @@ def _load_model6_tabular() -> None:
             import tensorflow as tf  # type: ignore
 
             path = diag["tabular_absolute_path"]
-            co = _make_h5_custom_objects(tf)
-            try:
-                logger.info("Model 6 tabular: attempting direct H5 load.")
-                MODEL6_TABULAR = tf.keras.models.load_model(
-                    path, compile=False, custom_objects=co
-                )
-            except Exception:
-                logger.warning(
-                    "Model 6 tabular direct load failed; trying compat path.",
-                    exc_info=True,
-                )
-                MODEL6_TABULAR = _load_h5_model_compat(tf, path)
+            logger.info("Model 6 tabular: loading H5 via compat sanitizer.")
+            MODEL6_TABULAR = _load_h5_model_compat(tf, path)
             MODEL6_SCALER = joblib.load(diag["scaler_absolute_path"])
             MODEL6_TABULAR_LOAD_ERROR = None
             logger.info(
