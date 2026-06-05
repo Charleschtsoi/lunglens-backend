@@ -14,6 +14,22 @@ FastAPI backend for LungLens image analysis, rule-based gating, questionnaire-as
 
 This README is written as a local onboarding guide for teammates: clone -> run -> test -> debug.
 
+## Repositories and live URLs
+
+| Role | GitHub | Live |
+|------|--------|------|
+| **Backend (this repo)** | [github.com/Charleschtsoi/lunglens-backend](https://github.com/Charleschtsoi/lunglens-backend) (`main`) | [charleschtsoi-lunglens-backend.hf.space](https://charleschtsoi-lunglens-backend.hf.space) |
+| **HF Space admin** | — | [huggingface.co/spaces/Charleschtsoi/lunglens-backend](https://huggingface.co/spaces/Charleschtsoi/lunglens-backend) |
+| **Frontend** | [github.com/Charleschtsoi/LungLens](https://github.com/Charleschtsoi/LungLens) (`main`) | [lung-lens-five.vercel.app](https://lung-lens-five.vercel.app) |
+
+Push code to GitHub and the Space:
+
+```bash
+git push origin main && git push hf main:main
+```
+
+Vercel `BACKEND_API_BASE_URL` should be `https://charleschtsoi-lunglens-backend.hf.space`. See [DEPLOY_HUGGINGFACE_VERCEL.md](DEPLOY_HUGGINGFACE_VERCEL.md) for full setup.
+
 ## ⚖️ License & Commercial Use (Open Core)
 
 This repository is the **LungLens backend engine** (ML inference, tabular models, and AI pipeline orchestration). It is licensed under the **[GNU Affero General Public License v3.0 (AGPLv3)](LICENSE)**.
@@ -71,9 +87,11 @@ Commercial inquiries: **enterprise@lunglens.com**.
 - `GET /health` -> detailed model health/load status
 - `GET /debug` -> provenance/debug diagnostics
 - `POST /api/v1/gemini/health-check` -> optional BYOK Gemini key probe (multipart `gemini_api_key`; blank = skip)
-- `POST /api/v1/analyze` -> primary analyze endpoint (includes `model4_swint` when Swin-T weights are present)
+- `POST /api/v1/analyze/jobs` -> **production path**: accept image, return `job_id` (202); inference runs in background
+- `GET /api/v1/analyze/jobs/{job_id}` -> poll `queued` / `processing` / `complete` / `failed`
+- `POST /api/v1/analyze` -> synchronous analyze (local/dev; may exceed serverless timeouts)
 - Reference contract: [`sample_response.json`](sample_response.json) (successful analyze baseline)
-- `POST /pipeline/analyze` -> alias of analyze endpoint
+- `POST /pipeline/analyze` -> alias of synchronous analyze endpoint
 - `POST /predict/densenet` -> standalone DenseNet inference + Grad-CAM
 - `POST /api/v1/generate-questions` -> Gemini (or rule fallback) educational insights for scan findings
 
@@ -190,6 +208,20 @@ If `REQUIRE_API_KEY=true`, include:
 -H "X-API-Key: <your-api-key>"
 ```
 
+### Async analyze (production — used by Vercel frontend)
+
+```bash
+# Submit job (returns quickly)
+curl -X POST "https://charleschtsoi-lunglens-backend.hf.space/api/v1/analyze/jobs" \
+  -H "X-API-Key: <your-api-key>" \
+  -F "image=@testfile/Lung Xray.jpeg;type=image/jpeg" \
+  -F 'questionnaire={}'
+
+# Poll until status is complete or failed
+curl "https://charleschtsoi-lunglens-backend.hf.space/api/v1/analyze/jobs/<job_id>" \
+  -H "X-API-Key: <your-api-key>"
+```
+
 ## 5) Run automated tests
 
 ```bash
@@ -220,11 +252,15 @@ pytest tests/test_api.py -q
 
 ## 7) Frontend integration notes
 
-For local frontend integration:
+| Environment | Frontend URL | Backend base URL |
+|-------------|----------------|------------------|
+| Production | https://lung-lens-five.vercel.app | https://charleschtsoi-lunglens-backend.hf.space |
+| Local | http://localhost:3000 | http://127.0.0.1:7861 (or HF URL above) |
 
-- Backend base URL: `http://localhost:7860`
-- If backend requires key, frontend/SSR must send `X-API-Key`.
-- Questionnaire impacts `clinical_risk` and `model4` summary context, not the base model inference outputs.
+- The Vercel app submits `POST /api/analyze/jobs` and polls until HF finishes (Hobby-safe).
+- Set `ALLOWED_ORIGINS` on the Space to include `https://lung-lens-five.vercel.app` (no `*` in production).
+- `BACKEND_API_KEY` on Vercel must match Space `API_KEY` when `REQUIRE_API_KEY=true`.
+- Questionnaire impacts `clinical_risk` and report context, not raw model logits.
 
 ## 8) Hugging Face Space + Vercel frontend
 
@@ -265,7 +301,7 @@ Run:
 ```bash
 docker run --rm -p 7860:7860 \
   -e ENVIRONMENT=production \
-  -e ALLOWED_ORIGINS=https://your-frontend.vercel.app \
+  -e ALLOWED_ORIGINS=https://lung-lens-five.vercel.app \
   -e REQUIRE_API_KEY=true \
   -e API_KEY=change-me \
   lunglens-backend
