@@ -6,5 +6,5 @@ __pycache__
 .pytest_cache
 .git
 .DS_Store
-models
+# Keep models/ — HF Docker Space needs LFS weights at /app/models/
 testfile
